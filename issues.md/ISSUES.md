@@ -13,6 +13,8 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 
 - [ ] [I100] Allow [text](../render_text_video.py) file to parse srt files with subtitles and timing, and distribute the words only through the timwindow allowed in subtitles. See example in [text](../data/inputs/captions.srt)
 
+- [ ] [I101] Add randomness to text genration, e.g. do not deterministically cucle through the direction of movement of the words but have randon choice of how the words will move
+
 ## BugFixes (300–399)
 
 ## Maintenance (400–499)
