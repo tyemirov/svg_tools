@@ -1,3 +1,29 @@
 .idea
 .DS_Store
 assets/
+data/inputs
+
+PLAN.md
+
+# Test coverage files
+*.out
+coverage*.html
+*_cov.html
+*_coverage.html
+
+# Managed by gix gitignore workflow
+.env
+.env.*
+.DS_Store
+qodana.yaml
+.idea/
+tools/
+bin/
+*.db
+*.log
+node_modules/
+test-results/
+.gocache/
+.cache/
+.npm-cache/
+.staticcheck-cache/
