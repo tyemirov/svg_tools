@@ -90,6 +90,23 @@ def expected_font_size_range(width: int, height: int) -> tuple[int, int]:
     return min_size, max_size
 
 
+def expected_letter_bands(
+    letter_count: int, width: int, height: int, direction: str
+) -> list[int]:
+    """Compute expected band positions for letter placement."""
+    if direction in ("T2B", "B2T"):
+        band_span = width
+    elif direction in ("L2R", "R2L"):
+        band_span = height
+    else:
+        raise ValueError(f"unsupported direction: {direction}")
+    step_size = band_span / float(letter_count + 1)
+    return [
+        int(round(step_size * (index_value + 1)))
+        for index_value in range(letter_count)
+    ]
+
+
 def test_srt_window_too_small(tmp_path: Path) -> None:
     """Fail when an SRT window is too short for its words."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -177,6 +194,7 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     assert first_payload["font_sizes"] == second_payload["font_sizes"]
     assert first_payload["words"] == second_payload["words"]
     assert first_payload["letter_offsets"] == second_payload["letter_offsets"]
+    assert first_payload["letter_bands"] == second_payload["letter_bands"]
 
     expected_min_size, expected_max_size = expected_font_size_range(64, 64)
     for font_size in first_payload["font_sizes"]:
@@ -186,6 +204,13 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     assert any(offset != 0 for offset in first_offsets)
     second_offsets = first_payload["letter_offsets"][1]
     assert all(offset == 0 for offset in second_offsets)
+
+    for word, direction, bands in zip(
+        first_payload["words"],
+        first_payload["directions"],
+        first_payload["letter_bands"],
+    ):
+        assert bands == expected_letter_bands(len(word), 64, 64, direction)
 
     args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
     other = run_render_text_video(args_other_seed, repo_root)

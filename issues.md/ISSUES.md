@@ -21,6 +21,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 ## BugFixes (300–399)
 
 - [x] [B300] Render vertical directions per-letter instead of moving whole words. Resolved with per-letter layout and staggered offsets.
+- [x] [B301] Render letters only (no word-level motion), using per-letter bands for vertical and horizontal directions. Resolved with banded letter rendering and updated emit payload/tests.
 
 ## Maintenance (400–499)
 
@@ -73,3 +74,4 @@ proceed
 - [I103] Priority: medium. Goal: remove punctuation from words when requested. Dependencies: CLI flag, tokenization changes for plain text and SRT. Docs: update `README.md` notes. Plan: add `--remove-punctuation`, strip punctuation in tokenization, emit words for test validation, run `make ci`. Deliverable: optional punctuation-stripped rendering.
 - [B300] Priority: high. Goal: animate letters individually for vertical directions (avoid whole-word floating). Dependencies: per-letter layout, draw pipeline updates. Docs: update `README.md` notes. Plan: render letters with staggered offsets for vertical directions, extend emit payload for tests, run `make ci`. Deliverable: per-letter vertical animation.
 - [I104] Priority: medium. Goal: support static background images and derive dimensions from the image. Dependencies: PIL image loading, CLI validation for mutually exclusive width/height vs background image. Docs: update `README.md` usage/notes. Plan: add `--background-image`, adjust validation, composite background, update tests. Deliverable: background image support with derived dimensions.
+- [B301] Priority: high. Goal: render letters only with banded positions so no word-level motion remains in any direction. Dependencies: per-letter metrics, band position computation. Docs: update `README.md` notes and emit payload. Plan: compute per-letter band positions for vertical/horizontal directions, render letters independently, extend emit JSON for bands, run `make ci`. Deliverable: letter-only motion in all directions with deterministic band output.

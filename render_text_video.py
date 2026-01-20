@@ -42,6 +42,8 @@ from service.render_plan import RenderPlan, build_render_plan
 
 
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
+HORIZONTAL_DIRECTIONS = ("L2R", "R2L")
+VERTICAL_DIRECTIONS = ("T2B", "B2T")
 LETTER_STAGGER_RATIO = 0.3
 LOGGER = logging.getLogger("render_text_video")
 
@@ -75,7 +77,6 @@ class WordToken:
     text: str
     style: WordStyle
     letters: Tuple["LetterToken", ...]
-    bbox: Tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -83,7 +84,6 @@ class LetterToken:
     """Single letter layout for a word token."""
 
     text: str
-    x_offset: int
     bbox: Tuple[int, int, int, int]
 
 
@@ -281,19 +281,15 @@ def build_letter_layout(
     word_text: str,
     font: ImageFont.FreeTypeFont,
     draw_context: ImageDraw.ImageDraw,
-) -> Tuple[Tuple[LetterToken, ...], Tuple[int, int, int, int]]:
+) -> Tuple[LetterToken, ...]:
     """Build per-letter layout information for a word."""
-    word_bbox = draw_context.textbbox((0, 0), word_text, font=font, stroke_width=0)
     letters: list[LetterToken] = []
-    for index_value, character in enumerate(word_text):
+    for character in word_text:
         letter_bbox = draw_context.textbbox(
             (0, 0), character, font=font, stroke_width=0
         )
-        x_offset = int(round(font.getlength(word_text[:index_value])))
-        letters.append(
-            LetterToken(text=character, x_offset=x_offset, bbox=letter_bbox)
-        )
-    return tuple(letters), word_bbox
+        letters.append(LetterToken(text=character, bbox=letter_bbox))
+    return tuple(letters)
 
 
 def build_tokens(
@@ -311,67 +307,90 @@ def build_tokens(
         font_size = font_sizes[index_value]
         font_value = load_font_cached(font_file_path, font_size, font_cache)
         color_value = palette[index_value % len(palette)]
-        letters, word_bbox = build_letter_layout(word_text, font_value, layout_draw)
+        letters = build_letter_layout(word_text, font_value, layout_draw)
         tokens.append(
             WordToken(
                 text=word_text,
                 style=WordStyle(font=font_value, color_rgba=color_value),
                 letters=letters,
-                bbox=word_bbox,
             )
         )
     return tokens
 
 
-def compute_position_for_frame(
+def compute_letter_position(
     direction: str,
     progress_value: float,
     frame_width: int,
     frame_height: int,
-    text_width: int,
-    text_height: int,
+    letter_width: int,
+    letter_height: int,
+    band_position: int,
 ) -> Tuple[int, int]:
-    """Compute a text position given a motion direction and progress."""
+    """Compute a letter position given a motion direction and progress."""
     clamped_progress = min(1.0, max(0.0, progress_value))
-    center_x = (frame_width - text_width) // 2
-    center_y = (frame_height - text_height) // 2
 
     if direction == "L2R":
-        start_x = -text_width
+        start_x = -letter_width
         end_x = frame_width
         x_value = int(round(start_x + (end_x - start_x) * clamped_progress))
-        return (x_value, center_y)
+        y_value = int(round(band_position - letter_height / 2))
+        return (x_value, y_value)
 
     if direction == "R2L":
         start_x = frame_width
-        end_x = -text_width
+        end_x = -letter_width
         x_value = int(round(start_x + (end_x - start_x) * clamped_progress))
-        return (x_value, center_y)
+        y_value = int(round(band_position - letter_height / 2))
+        return (x_value, y_value)
 
     if direction == "T2B":
-        start_y = -text_height
+        start_y = -letter_height
         end_y = frame_height
         y_value = int(round(start_y + (end_y - start_y) * clamped_progress))
-        return (center_x, y_value)
+        x_value = int(round(band_position - letter_width / 2))
+        return (x_value, y_value)
 
     if direction == "B2T":
         start_y = frame_height
-        end_y = -text_height
+        end_y = -letter_height
         y_value = int(round(start_y + (end_y - start_y) * clamped_progress))
-        return (center_x, y_value)
+        x_value = int(round(band_position - letter_width / 2))
+        return (x_value, y_value)
 
     raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
 
 
 def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ...]:
     """Compute per-letter stagger offsets for a direction."""
-    if letter_count <= 1 or direction not in ("T2B", "B2T"):
+    if letter_count <= 1 or direction not in VERTICAL_DIRECTIONS:
         return tuple(0.0 for _ in range(letter_count))
     offsets: list[float] = []
     for index_value in range(letter_count):
         normalized = index_value / float(max(1, letter_count - 1))
         offsets.append((normalized - 0.5) * LETTER_STAGGER_RATIO)
     return tuple(offsets)
+
+
+def compute_letter_band_positions(
+    letter_count: int, frame_width: int, frame_height: int, direction: str
+) -> Tuple[int, ...]:
+    """Compute band positions for letters based on motion direction."""
+    if letter_count <= 0:
+        return ()
+    if direction in VERTICAL_DIRECTIONS:
+        band_span = frame_width
+    elif direction in HORIZONTAL_DIRECTIONS:
+        band_span = frame_height
+    else:
+        raise RenderPipelineError(
+            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
+        )
+    step_size = band_span / float(letter_count + 1)
+    return tuple(
+        int(round(step_size * (index_value + 1)))
+        for index_value in range(letter_count)
+    )
 
 
 def apply_letter_progress(base_progress: float, offset: float) -> float:
@@ -477,6 +496,7 @@ def emit_directions(
     font_sizes: Sequence[int],
     words: Sequence[str],
     letter_offsets: Sequence[Sequence[float]],
+    letter_bands: Sequence[Sequence[int]],
 ) -> None:
     """Emit direction choices to stdout."""
     payload = {
@@ -484,6 +504,7 @@ def emit_directions(
         "font_sizes": list(font_sizes),
         "words": list(words),
         "letter_offsets": [list(offsets) for offsets in letter_offsets],
+        "letter_bands": [list(bands) for bands in letter_bands],
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
 
@@ -505,6 +526,7 @@ def render_video(
     current_token_index: int | None = None
     current_token: WordToken | None = None
     current_letter_offsets: Tuple[float, ...] = ()
+    current_letter_bands: Tuple[int, ...] = ()
 
     try:
         for frame_index in range(plan.total_frames):
@@ -517,6 +539,7 @@ def render_video(
                     current_token_index = None
                     current_token = None
                     current_letter_offsets = ()
+                    current_letter_bands = ()
                 if schedule_index < len(plan.scheduled_words):
                     schedule = plan.scheduled_words[schedule_index]
                     if frame_index >= schedule.start_frame:
@@ -535,8 +558,15 @@ def render_video(
                 if token_index != current_token_index:
                     current_token_index = token_index
                     current_token = tokens[token_index]
+                    direction = directions[token_index]
                     current_letter_offsets = compute_letter_offsets(
-                        len(current_token.letters), directions[token_index]
+                        len(current_token.letters), direction
+                    )
+                    current_letter_bands = compute_letter_band_positions(
+                        len(current_token.letters),
+                        config.width,
+                        config.height,
+                        direction,
                     )
                 token = current_token
                 if token is None:
@@ -549,23 +579,23 @@ def render_video(
                 )
                 direction = directions[token_index]
 
-                word_width = token.bbox[2] - token.bbox[0]
-                word_height = token.bbox[3] - token.bbox[1]
-
                 for letter_index, letter in enumerate(token.letters):
                     letter_progress = apply_letter_progress(
                         progress, current_letter_offsets[letter_index]
                     )
-                    pos_x, pos_y = compute_position_for_frame(
+                    letter_width = letter.bbox[2] - letter.bbox[0]
+                    letter_height = letter.bbox[3] - letter.bbox[1]
+                    pos_x, pos_y = compute_letter_position(
                         direction=direction,
                         progress_value=letter_progress,
                         frame_width=config.width,
                         frame_height=config.height,
-                        text_width=word_width,
-                        text_height=word_height,
+                        letter_width=letter_width,
+                        letter_height=letter_height,
+                        band_position=current_letter_bands[letter_index],
                     )
                     draw_context.text(
-                        (pos_x + letter.x_offset, pos_y),
+                        (pos_x, pos_y),
                         letter.text,
                         font=token.style.font,
                         fill=token.style.color_rgba,
@@ -720,8 +750,16 @@ def main() -> int:
             compute_letter_offsets(len(word), direction)
             for word, direction in zip(plan.words, directions)
         ]
+        letter_bands = [
+            compute_letter_band_positions(
+                len(word), request.config.width, request.config.height, direction
+            )
+            for word, direction in zip(plan.words, directions)
+        ]
         if request.emit_directions:
-            emit_directions(directions, font_sizes, plan.words, letter_offsets)
+            emit_directions(
+                directions, font_sizes, plan.words, letter_offsets, letter_bands
+            )
             return 0
         validate_ffmpeg_capabilities()
         tokens = build_render_tokens(plan, request.config, font_sizes)
