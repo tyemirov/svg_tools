@@ -192,6 +192,34 @@ HEIF/HEIC is supported via `pillow-heif`.
 
 ---
 
+### `render_text_video.py`
+
+Render animated word-by-word text into a transparent ProRes 4444 MOV.
+
+Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
+
+**Usage:**
+
+```shell
+./render_text_video.py \
+    --input-text-file <PATH> \
+    --output-video-file <PATH.mov> \
+    --width <PIXELS> \
+    --height <PIXELS> \
+    --duration-seconds <FLOAT> \
+    [--fps <INT>] \
+    [--background <transparent|#RRGGBB>] \
+    [--fonts-dir <PATH>]
+```
+
+**Notes**
+
+* Input text must be valid UTF-8 and is split on whitespace.
+* `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
+* Output is always a `.mov` file; default name is `video.mov`.
+
+---
+
 ### `text_to_svg.py`
 
 Render any text into a valid single-path SVG file.
