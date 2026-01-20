@@ -149,10 +149,16 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     assert first_payload["directions"] == second_payload["directions"]
     assert first_payload["font_sizes"] == second_payload["font_sizes"]
     assert first_payload["words"] == second_payload["words"]
+    assert first_payload["letter_offsets"] == second_payload["letter_offsets"]
 
     expected_min_size, expected_max_size = expected_font_size_range(64, 64)
     for font_size in first_payload["font_sizes"]:
         assert expected_min_size <= font_size <= expected_max_size
+
+    first_offsets = first_payload["letter_offsets"][0]
+    assert any(offset != 0 for offset in first_offsets)
+    second_offsets = first_payload["letter_offsets"][1]
+    assert all(offset == 0 for offset in second_offsets)
 
     args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
     other = run_render_text_video(args_other_seed, repo_root)
@@ -161,6 +167,7 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     other_payload = json.loads(other.stdout or "{}")
     assert other_payload["directions"] != first_payload["directions"]
     assert other_payload["font_sizes"] != first_payload["font_sizes"]
+    assert other_payload["letter_offsets"] != first_payload["letter_offsets"]
 
 
 def test_remove_punctuation(tmp_path: Path) -> None:

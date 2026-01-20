@@ -19,6 +19,8 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 
 ## BugFixes (300–399)
 
+- [x] [B300] Render vertical directions per-letter instead of moving whole words. Resolved with per-letter layout and staggered offsets.
+
 ## Maintenance (400–499)
 
 ### Recurring (close when done but do not remove)
@@ -68,3 +70,4 @@ proceed
 - [M403] Priority: medium. Goal: add GitHub Actions CI workflow running `make ci`. Dependencies: ubuntu runner with ffmpeg, uv install action. Docs: `README.md` optional. Plan: add workflow, run `make ci`, mark issue resolved. Deliverable: `.github/workflows/ci.yml` running on push/PR.
 - [I102] Priority: medium. Goal: randomize per-word font sizes with larger dynamic min/max based on screen size. Dependencies: fonts in `assets/fonts`, CLI output for deterministic tests. Docs: update `README.md` notes. Plan: add size range selection, emit sizes in JSON output, update tests, run `make ci`. Deliverable: oversized randomized font sizes applied to rendering.
 - [I103] Priority: medium. Goal: remove punctuation from words when requested. Dependencies: CLI flag, tokenization changes for plain text and SRT. Docs: update `README.md` notes. Plan: add `--remove-punctuation`, strip punctuation in tokenization, emit words for test validation, run `make ci`. Deliverable: optional punctuation-stripped rendering.
+- [B300] Priority: high. Goal: animate letters individually for vertical directions (avoid whole-word floating). Dependencies: per-letter layout, draw pipeline updates. Docs: update `README.md` notes. Plan: render letters with staggered offsets for vertical directions, extend emit payload for tests, run `make ci`. Deliverable: per-letter vertical animation.

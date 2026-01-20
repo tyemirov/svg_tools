@@ -40,6 +40,7 @@ from service.render_plan import RenderPlan, build_render_plan
 
 
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
+LETTER_STAGGER_RATIO = 0.3
 LOGGER = logging.getLogger("render_text_video")
 
 FFMPEG_NOT_FOUND_CODE = "render_text_video.ffmpeg.not_found"
@@ -71,6 +72,17 @@ class WordToken:
 
     text: str
     style: WordStyle
+    letters: Tuple["LetterToken", ...]
+    bbox: Tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class LetterToken:
+    """Single letter layout for a word token."""
+
+    text: str
+    x_offset: int
+    bbox: Tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -245,6 +257,25 @@ def load_font_cached(
     return font
 
 
+def build_letter_layout(
+    word_text: str,
+    font: ImageFont.FreeTypeFont,
+    draw_context: ImageDraw.ImageDraw,
+) -> Tuple[Tuple[LetterToken, ...], Tuple[int, int, int, int]]:
+    """Build per-letter layout information for a word."""
+    word_bbox = draw_context.textbbox((0, 0), word_text, font=font, stroke_width=0)
+    letters: list[LetterToken] = []
+    for index_value, character in enumerate(word_text):
+        letter_bbox = draw_context.textbbox(
+            (0, 0), character, font=font, stroke_width=0
+        )
+        x_offset = int(round(font.getlength(word_text[:index_value])))
+        letters.append(
+            LetterToken(text=character, x_offset=x_offset, bbox=letter_bbox)
+        )
+    return tuple(letters), word_bbox
+
+
 def build_tokens(
     words: Sequence[str],
     font_files: Sequence[str],
@@ -254,26 +285,22 @@ def build_tokens(
     """Create styled tokens for each word."""
     tokens: list[WordToken] = []
     font_cache: dict[Tuple[str, int], ImageFont.FreeTypeFont] = {}
+    layout_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     for index_value, word_text in enumerate(words):
         font_file_path = font_files[index_value % len(font_files)]
         font_size = font_sizes[index_value]
         font_value = load_font_cached(font_file_path, font_size, font_cache)
         color_value = palette[index_value % len(palette)]
+        letters, word_bbox = build_letter_layout(word_text, font_value, layout_draw)
         tokens.append(
             WordToken(
-                text=word_text, style=WordStyle(font=font_value, color_rgba=color_value)
+                text=word_text,
+                style=WordStyle(font=font_value, color_rgba=color_value),
+                letters=letters,
+                bbox=word_bbox,
             )
         )
     return tokens
-
-
-def measure_text(
-    draw_context: ImageDraw.ImageDraw, token: WordToken
-) -> Tuple[int, int, int, int]:
-    """Measure a token bounding box."""
-    return draw_context.textbbox(
-        (0, 0), token.text, font=token.style.font, stroke_width=0
-    )
 
 
 def compute_position_for_frame(
@@ -314,6 +341,22 @@ def compute_position_for_frame(
         return (center_x, y_value)
 
     raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
+
+
+def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ...]:
+    """Compute per-letter stagger offsets for a direction."""
+    if letter_count <= 1 or direction not in ("T2B", "B2T"):
+        return tuple(0.0 for _ in range(letter_count))
+    offsets: list[float] = []
+    for index_value in range(letter_count):
+        normalized = index_value / float(max(1, letter_count - 1))
+        offsets.append((normalized - 0.5) * LETTER_STAGGER_RATIO)
+    return tuple(offsets)
+
+
+def apply_letter_progress(base_progress: float, offset: float) -> float:
+    """Apply a stagger offset to the base progress."""
+    return min(1.0, max(0.0, base_progress + offset))
 
 
 def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
@@ -413,12 +456,14 @@ def emit_directions(
     directions: Sequence[str],
     font_sizes: Sequence[int],
     words: Sequence[str],
+    letter_offsets: Sequence[Sequence[float]],
 ) -> None:
     """Emit direction choices to stdout."""
     payload = {
         "directions": list(directions),
         "font_sizes": list(font_sizes),
         "words": list(words),
+        "letter_offsets": [list(offsets) for offsets in letter_offsets],
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
 
@@ -436,6 +481,9 @@ def render_video(
 
     schedule_index = 0
     current_schedule = None
+    current_token_index: int | None = None
+    current_token: WordToken | None = None
+    current_letter_offsets: Tuple[float, ...] = ()
 
     try:
         for frame_index in range(plan.total_frames):
@@ -445,6 +493,9 @@ def render_video(
                 if frame_index >= schedule_end:
                     schedule_index += 1
                     current_schedule = None
+                    current_token_index = None
+                    current_token = None
+                    current_letter_offsets = ()
                 if schedule_index < len(plan.scheduled_words):
                     schedule = plan.scheduled_words[schedule_index]
                     if frame_index >= schedule.start_frame:
@@ -456,32 +507,45 @@ def render_video(
             draw_context = ImageDraw.Draw(frame_image)
 
             if current_schedule is not None:
-                token = tokens[current_schedule.token_index]
+                token_index = current_schedule.token_index
+                if token_index != current_token_index:
+                    current_token_index = token_index
+                    current_token = tokens[token_index]
+                    current_letter_offsets = compute_letter_offsets(
+                        len(current_token.letters), directions[token_index]
+                    )
+                token = current_token
+                if token is None:
+                    raise RenderPipelineError(
+                        FFMPEG_PROCESS_CODE, "render token missing"
+                    )
                 within_word_index = frame_index - current_schedule.start_frame
                 progress = within_word_index / float(
                     max(1, current_schedule.frame_count - 1)
                 )
-                direction = directions[current_schedule.token_index]
+                direction = directions[token_index]
 
-                bbox = measure_text(draw_context, token)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
+                word_width = token.bbox[2] - token.bbox[0]
+                word_height = token.bbox[3] - token.bbox[1]
 
-                pos_x, pos_y = compute_position_for_frame(
-                    direction=direction,
-                    progress_value=progress,
-                    frame_width=config.width,
-                    frame_height=config.height,
-                    text_width=text_width,
-                    text_height=text_height,
-                )
-
-                draw_context.text(
-                    (pos_x, pos_y),
-                    token.text,
-                    font=token.style.font,
-                    fill=token.style.color_rgba,
-                )
+                for letter_index, letter in enumerate(token.letters):
+                    letter_progress = apply_letter_progress(
+                        progress, current_letter_offsets[letter_index]
+                    )
+                    pos_x, pos_y = compute_position_for_frame(
+                        direction=direction,
+                        progress_value=letter_progress,
+                        frame_width=config.width,
+                        frame_height=config.height,
+                        text_width=word_width,
+                        text_height=word_height,
+                    )
+                    draw_context.text(
+                        (pos_x + letter.x_offset, pos_y),
+                        letter.text,
+                        font=token.style.font,
+                        fill=token.style.color_rgba,
+                    )
 
             ffmpeg_process.stdin.write(frame_image.tobytes())
 
@@ -607,8 +671,12 @@ def main() -> int:
         rng = random.Random(request.direction_seed)
         directions = select_directions(len(plan.words), rng)
         font_sizes = select_font_sizes(len(plan.words), request.config, rng)
+        letter_offsets = [
+            compute_letter_offsets(len(word), direction)
+            for word, direction in zip(plan.words, directions)
+        ]
         if request.emit_directions:
-            emit_directions(directions, font_sizes, plan.words)
+            emit_directions(directions, font_sizes, plan.words, letter_offsets)
             return 0
         validate_ffmpeg_capabilities()
         tokens = build_render_tokens(plan, request.config, font_sizes)

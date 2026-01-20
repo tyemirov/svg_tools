@@ -223,7 +223,8 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 * `--direction-seed` makes direction selection deterministic for a given seed.
 * `--remove-punctuation` strips punctuation from words before rendering.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
-* `--emit-directions` prints JSON with `directions`, `font_sizes`, and `words`, then exits without rendering.
+* Vertical directions animate letters with staggered offsets (so letters move independently).
+* `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, and `letter_offsets`, then exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
 
 ---
