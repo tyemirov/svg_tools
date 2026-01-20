@@ -1,0 +1,152 @@
+"""Domain types and parsing for render_text_video."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+from typing import Tuple
+
+INVALID_COLOR_CODE = "render_text_video.input.invalid_color"
+INVALID_CONFIG_CODE = "render_text_video.input.invalid_config"
+INVALID_SRT_CODE = "render_text_video.input.invalid_srt"
+INVALID_WINDOW_CODE = "render_text_video.input.invalid_window"
+EMPTY_TEXT_CODE = "render_text_video.input.empty_text"
+INPUT_FILE_CODE = "render_text_video.input.file_error"
+FONT_DIR_CODE = "render_text_video.input.fonts_missing"
+FONT_LOAD_CODE = "render_text_video.input.fonts_unloadable"
+
+SRT_TIME_RANGE_PATTERN = re.compile(
+    r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2},\d{3})$"
+)
+SRT_TIMECODE_PATTERN = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})$")
+
+
+class RenderValidationError(ValueError):
+    """Validation error with a stable error code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class RenderConfig:
+    """Validated configuration for render_text_video."""
+
+    input_text_file: str
+    output_video_file: str
+    width: int
+    height: int
+    duration_seconds: float
+    fps: int
+    background_rgba: Tuple[int, int, int, int]
+    fonts_dir: str
+
+    def __post_init__(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "width and height must be positive"
+            )
+        if self.fps <= 0:
+            raise RenderValidationError(INVALID_CONFIG_CODE, "fps must be positive")
+        if self.duration_seconds <= 0:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "duration_seconds must be positive"
+            )
+        if not self.output_video_file.lower().endswith(".mov"):
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "output_video_file must end with .mov"
+            )
+        if len(self.background_rgba) != 4:
+            raise RenderValidationError(INVALID_CONFIG_CODE, "background_rgba is invalid")
+        for channel in self.background_rgba:
+            if channel < 0 or channel > 255:
+                raise RenderValidationError(
+                    INVALID_CONFIG_CODE, "background_rgba channel out of range"
+                )
+
+
+@dataclass(frozen=True)
+class SubtitleWindow:
+    """Time-bounded subtitle words."""
+
+    start_seconds: float
+    end_seconds: float
+    words: Tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.start_seconds < 0:
+            raise RenderValidationError(
+                INVALID_WINDOW_CODE, "subtitle start time must be non-negative"
+            )
+        if self.end_seconds <= self.start_seconds:
+            raise RenderValidationError(
+                INVALID_WINDOW_CODE, "subtitle end time must be after start time"
+            )
+        if not self.words:
+            raise RenderValidationError(
+                INVALID_WINDOW_CODE, "subtitle window contains no words"
+            )
+
+
+def tokenize_words(text_value: str) -> Tuple[str, ...]:
+    """Split text into whitespace-delimited words."""
+    stripped_text = text_value.replace("\ufeff", "").strip()
+    if not stripped_text:
+        raise RenderValidationError(EMPTY_TEXT_CODE, "input text contains no words")
+    return tuple(stripped_text.split())
+
+
+def parse_timecode(timecode_value: str) -> float:
+    """Parse an SRT timecode into seconds."""
+    match = SRT_TIMECODE_PATTERN.fullmatch(timecode_value.strip())
+    if not match:
+        raise RenderValidationError(
+            INVALID_SRT_CODE, f"invalid timecode: {timecode_value!r}"
+        )
+    hours, minutes, seconds, millis = (int(part) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+
+
+def parse_srt(text_value: str) -> Tuple[SubtitleWindow, ...]:
+    """Parse SRT content into subtitle windows."""
+    normalized = text_value.replace("\ufeff", "").strip()
+    if not normalized:
+        raise RenderValidationError(EMPTY_TEXT_CODE, "SRT input is empty")
+
+    blocks = re.split(r"\n\s*\n", normalized)
+    windows: list[SubtitleWindow] = []
+
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if lines[0].isdigit():
+            lines = lines[1:]
+        if not lines:
+            raise RenderValidationError(INVALID_SRT_CODE, "SRT block missing timecode")
+
+        time_line = lines[0]
+        match = SRT_TIME_RANGE_PATTERN.fullmatch(time_line)
+        if not match:
+            raise RenderValidationError(
+                INVALID_SRT_CODE, f"invalid time range: {time_line!r}"
+            )
+
+        start_seconds = parse_timecode(match.group("start"))
+        end_seconds = parse_timecode(match.group("end"))
+        subtitle_lines = lines[1:]
+        if not subtitle_lines:
+            raise RenderValidationError(INVALID_SRT_CODE, "SRT block missing text")
+
+        words = tokenize_words(" ".join(subtitle_lines))
+        windows.append(
+            SubtitleWindow(
+                start_seconds=start_seconds, end_seconds=end_seconds, words=words
+            )
+        )
+
+    if not windows:
+        raise RenderValidationError(EMPTY_TEXT_CODE, "SRT contains no subtitles")
+
+    return tuple(windows)

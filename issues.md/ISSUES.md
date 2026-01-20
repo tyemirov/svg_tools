@@ -11,7 +11,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 
 ## Improvements (200–299)
 
-- [ ] [I100] Allow [text](../render_text_video.py) file to parse srt files with subtitles and timing, and distribute the words only through the timwindow allowed in subtitles. See example in [text](../data/inputs/captions.srt)
+- [x] [I100] Allow [text](../render_text_video.py) file to parse srt files with subtitles and timing, and distribute the words only through the timwindow allowed in subtitles. See example in [text](../data/inputs/captions.srt). Resolved with SRT parsing, timing-aware scheduling, and integration tests.
 
 - [ ] [I101] Add randomness to text genration, e.g. do not deterministically circle through the directions of movement of the words but have randon choice of how the words will move (only using predefined four directions of movement for now)
 
@@ -54,3 +54,7 @@ proceed
 
 ## Tooling Baseline (M400-M402)
 - `make test`, `make lint`, and `make ci` failed before changes because no `Makefile` targets exist yet.
+
+## Tooling Baseline (I100)
+- `make test` failed before changes because SRT window validation is not implemented yet.
+- `make lint` failed before changes because `domain/` and `service/` packages do not exist yet.

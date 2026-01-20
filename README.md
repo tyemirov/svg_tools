@@ -215,6 +215,7 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 **Notes**
 
 * Input text must be valid UTF-8 and is split on whitespace.
+* `.srt` input files are parsed as subtitle windows; words render only inside each time range.
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * Output is always a `.mov` file; default name is `video.mov`.
 
