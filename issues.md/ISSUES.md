@@ -58,3 +58,9 @@ proceed
 ## Tooling Baseline (I100)
 - `make test` failed before changes because SRT window validation is not implemented yet.
 - `make lint` failed before changes because `domain/` and `service/` packages do not exist yet.
+
+## Maintenance Additions (400–499)
+- [x] [M403] Add GitHub Actions CI to run `make ci` with uv and ffmpeg. Resolved with new workflow and local `make ci`.
+
+## Issue Context Addendum (M401)
+- [M403] Priority: medium. Goal: add GitHub Actions CI workflow running `make ci`. Dependencies: ubuntu runner with ffmpeg, uv install action. Docs: `README.md` optional. Plan: add workflow, run `make ci`, mark issue resolved. Deliverable: `.github/workflows/ci.yml` running on push/PR.
