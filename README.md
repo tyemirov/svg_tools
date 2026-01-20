@@ -37,18 +37,21 @@ There is no need to call `uv run` explicitly — the shebang handles it.
 
 ### `generate_color_gradient.py`
 
-Generate a left-to-right gradient based on a single named color (darker shade → lighter shade)
-and draw a centered rectangle of a specified color and ratio.
+Generate a dithered gradient based on a single named color (darker shade → lighter shade)
+in a configurable direction, and draw a centered rectangle of a specified color and ratio.
 
 **Usage:**
 
 ```shell
 ./generate_color_gradient.py \
-    --gradient-color <COLOR_NAME_OR_HEX> \
+    --gradient-color <COLOR_NAME_OR_HEX> \  # base color when start/end not provided
+    [--start-color <COLOR_NAME_OR_HEX>] \   # optional explicit gradient start
+    [--end-color <COLOR_NAME_OR_HEX>] \     # optional explicit gradient end
     --center-color <COLOR_NAME_OR_HEX> \
     --width <PIXELS> \
     --height <PIXELS> \
     --rectangle-ratio <FLOAT> \
+    --direction <horizontal|vertical|diag-down|diag-up> \
     --output-file <PATH>
 ```
 
@@ -57,10 +60,13 @@ Example:
 ```shell
 ./generate_color_gradient.py \
     --gradient-color turquoise \
+    --start-color '#0062B8' \
+    --end-color '#0293D7' \
     --center-color gold \
     --width 1600 \
     --height 900 \
     --rectangle-ratio 0.5 \
+    --direction diag-down \
     --output-file turquoise_golden_16x9.png
 ```
 

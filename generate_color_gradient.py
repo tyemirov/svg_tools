@@ -10,21 +10,44 @@ import argparse
 from PIL import Image, ImageDraw, ImageColor
 import numpy as np
 
-def generate_dithered_gradient(left_color_rgb, right_color_rgb, width, height):
+def generate_dithered_gradient(left_color_rgb, right_color_rgb, width, height, direction):
     """
-    Generate a left-to-right 8-bit gradient between two RGB colors,
+    Generate an 8-bit gradient between two RGB colors in a given direction,
     then apply 1-pixel-scale dithering to hide banding.
+
+    direction:
+        - "horizontal": left → right
+        - "vertical": top → bottom
+        - "diag-down": top-left → bottom-right
+        - "diag-up": bottom-left → top-right
     """
     # Create a float32 array so we can add sub-1.0 noise before converting to uint8
     gradient_array = np.zeros((height, width, 3), dtype=np.float32)
     left_color = np.array(left_color_rgb, dtype=np.float32)
     right_color = np.array(right_color_rgb, dtype=np.float32)
 
-    # Linear interpolate per column
-    for x in range(width):
-        alpha = x / (width - 1)
-        interpolated = (1 - alpha) * left_color + alpha * right_color
-        gradient_array[:, x, :] = interpolated
+    # Build an alpha ramp in the requested direction.
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    if direction == "horizontal":
+        denom = max(width - 1, 1)
+        alpha = xx / denom
+    elif direction == "vertical":
+        denom = max(height - 1, 1)
+        alpha = yy / denom
+    elif direction == "diag-down":
+        # Top-left (0,0) → bottom-right (width-1,height-1)
+        denom = max((width - 1) + (height - 1), 1)
+        alpha = (xx + yy) / denom
+    elif direction == "diag-up":
+        # Bottom-left (0,height-1) → top-right (width-1,0)
+        denom = max((width - 1) + (height - 1), 1)
+        alpha = (xx + (height - 1 - yy)) / denom
+    else:
+        raise ValueError(f"Unsupported gradient direction: {direction}")
+
+    alpha = alpha[..., np.newaxis]
+    interpolated = (1.0 - alpha) * left_color + alpha * right_color
+    gradient_array[:, :, :] = interpolated
 
     # Add uniform noise in [-0.5, +0.5) to each 8-bit channel to dither
     noise = (np.random.rand(height, width, 3).astype(np.float32) - 0.5)
@@ -73,7 +96,16 @@ def main():
     parser.add_argument(
         "--gradient-color",
         required=True,
-        help="Named color or hex string for the gradient base (e.g. 'red' or '#FF0000')."
+        help="Named color or hex string for the gradient base (e.g. 'red' or '#FF0000'). "
+             "Ignored when both --start-color and --end-color are provided."
+    )
+    parser.add_argument(
+        "--start-color",
+        help="Optional explicit color at the gradient origin. Must be used together with --end-color."
+    )
+    parser.add_argument(
+        "--end-color",
+        help="Optional explicit color at the gradient destination. Must be used together with --start-color."
     )
     parser.add_argument(
         "--center-color",
@@ -99,17 +131,41 @@ def main():
         help="Fraction of image width for rectangle width (height follows 16:9). Default: 0.5."
     )
     parser.add_argument(
+        "--direction",
+        choices=["horizontal", "vertical", "diag-down", "diag-up"],
+        default="horizontal",
+        help=(
+            "Direction of the gradient: "
+            "'horizontal' (left→right), 'vertical' (top→bottom), "
+            "'diag-down' (top-left→bottom-right), or "
+            "'diag-up' (bottom-left→top-right). Default: horizontal."
+        ),
+    )
+    parser.add_argument(
         "--output-file",
         required=True,
         help="Path for the generated image (any extension PIL supports, e.g. .jpg, .png)."
     )
     args = parser.parse_args()
 
-    base_rgb = parse_color_name_to_rgb(args.gradient_color)
-    left_rgb, right_rgb = compute_darker_and_lighter(base_rgb)
+    # Choose gradient endpoints: either explicit start/end or derived from a base color.
+    if (args.start_color is None) ^ (args.end_color is None):
+        raise SystemExit("Error: --start-color and --end-color must be provided together.")
+    if args.start_color is not None and args.end_color is not None:
+        left_rgb = parse_color_name_to_rgb(args.start_color)
+        right_rgb = parse_color_name_to_rgb(args.end_color)
+    else:
+        base_rgb = parse_color_name_to_rgb(args.gradient_color)
+        left_rgb, right_rgb = compute_darker_and_lighter(base_rgb)
 
     # Always generate an 8-bit dithered gradient (so that saving to JPEG is possible)
-    gradient_image = generate_dithered_gradient(left_rgb, right_rgb, args.width, args.height)
+    gradient_image = generate_dithered_gradient(
+        left_rgb,
+        right_rgb,
+        args.width,
+        args.height,
+        direction=args.direction,
+    )
 
     rectangle_rgb = parse_color_name_to_rgb(args.center_color)
     final_image = add_center_rectangle(gradient_image, args.rectangle_ratio, rectangle_rgb)
