@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -69,6 +71,15 @@ class WordToken:
 
     text: str
     style: WordStyle
+
+
+@dataclass(frozen=True)
+class RenderRequest:
+    """Parsed CLI request and runtime options."""
+
+    config: RenderConfig
+    direction_seed: int | None
+    emit_directions: bool
 
 
 def configure_logging() -> None:
@@ -325,24 +336,43 @@ def build_subtitle_windows(
     )
 
 
-def build_render_inputs(config: RenderConfig) -> Tuple[RenderPlan, list[WordToken]]:
-    """Load input text, build a render plan, and generate tokens."""
+def build_render_plan_from_input(config: RenderConfig) -> RenderPlan:
+    """Load input text and build a render plan."""
     input_text = read_utf8_text_strict(config.input_text_file)
     windows = build_subtitle_windows(config, input_text)
-    plan = build_render_plan(
+    return build_render_plan(
         windows=windows,
         fps=config.fps,
         duration_seconds=config.duration_seconds,
     )
+
+
+def build_render_tokens(plan: RenderPlan, config: RenderConfig) -> list[WordToken]:
+    """Build word tokens from a render plan."""
     palette = build_palette_rgba()
     font_files = list_font_files(config.fonts_dir)
     font_size = compute_font_size(config.width, config.height)
     fonts = load_fonts(font_files, font_size=font_size)
-    tokens = build_tokens(plan.words, fonts=fonts, palette=palette)
-    return plan, tokens
+    return build_tokens(plan.words, fonts=fonts, palette=palette)
 
 
-def render_video(config: RenderConfig, plan: RenderPlan, tokens: Sequence[WordToken]) -> None:
+def select_directions(word_count: int, rng: random.Random) -> Tuple[str, ...]:
+    """Select random directions for each word."""
+    return tuple(rng.choice(DIRECTIONS) for _ in range(word_count))
+
+
+def emit_directions(directions: Sequence[str]) -> None:
+    """Emit direction choices to stdout."""
+    payload = {"directions": list(directions)}
+    sys.stdout.write(json.dumps(payload, ensure_ascii=True))
+
+
+def render_video(
+    config: RenderConfig,
+    plan: RenderPlan,
+    tokens: Sequence[WordToken],
+    directions: Sequence[str],
+) -> None:
     """Render frames based on the render plan."""
     ffmpeg_process = open_ffmpeg_process(config)
     if not ffmpeg_process.stdin:
@@ -375,7 +405,7 @@ def render_video(config: RenderConfig, plan: RenderPlan, tokens: Sequence[WordTo
                 progress = within_word_index / float(
                     max(1, current_schedule.frame_count - 1)
                 )
-                direction = DIRECTIONS[current_schedule.token_index % len(DIRECTIONS)]
+                direction = directions[current_schedule.token_index]
 
                 bbox = measure_text(draw_context, token)
                 text_width = bbox[2] - bbox[0]
@@ -423,8 +453,8 @@ def render_video(config: RenderConfig, plan: RenderPlan, tokens: Sequence[WordTo
             pass
 
 
-def parse_args(argv: Sequence[str]) -> RenderConfig:
-    """Parse CLI arguments into a RenderConfig."""
+def parse_args(argv: Sequence[str]) -> RenderRequest:
+    """Parse CLI arguments into a RenderRequest."""
     parser = argparse.ArgumentParser(prog="render_text_video.py", add_help=True)
     parser.add_argument("--input-text-file", required=True)
     parser.add_argument("--output-video-file", default="video.mov")
@@ -436,11 +466,13 @@ def parse_args(argv: Sequence[str]) -> RenderConfig:
         "--background", default="transparent", help="transparent (default) or #RRGGBB"
     )
     parser.add_argument("--fonts-dir", default="fonts")
+    parser.add_argument("--direction-seed", type=int, default=None)
+    parser.add_argument("--emit-directions", action="store_true")
 
     parsed = parser.parse_args(argv)
     background_rgba = parse_hex_color_to_rgba(parsed.background)
 
-    return RenderConfig(
+    config = RenderConfig(
         input_text_file=parsed.input_text_file,
         output_video_file=parsed.output_video_file,
         width=parsed.width,
@@ -449,6 +481,12 @@ def parse_args(argv: Sequence[str]) -> RenderConfig:
         fps=parsed.fps,
         background_rgba=background_rgba,
         fonts_dir=parsed.fonts_dir,
+    )
+
+    return RenderRequest(
+        config=config,
+        direction_seed=parsed.direction_seed,
+        emit_directions=parsed.emit_directions,
     )
 
 
@@ -504,10 +542,16 @@ def main() -> int:
     configure_logging()
 
     try:
-        config = parse_args(sys.argv[1:])
+        request = parse_args(sys.argv[1:])
+        plan = build_render_plan_from_input(request.config)
+        rng = random.Random(request.direction_seed)
+        directions = select_directions(len(plan.words), rng)
+        if request.emit_directions:
+            emit_directions(directions)
+            return 0
         validate_ffmpeg_capabilities()
-        plan, tokens = build_render_inputs(config)
-        render_video(config, plan, tokens)
+        tokens = build_render_tokens(plan, request.config)
+        render_video(request.config, plan, tokens, directions)
         return 0
     except RenderValidationError as exc:
         LOGGER.error("%s: %s", exc.code, str(exc).strip())

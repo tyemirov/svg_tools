@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import List
@@ -104,3 +105,43 @@ def test_srt_success(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert output_path.exists()
     assert output_path.stat().st_size > 0
+
+
+def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
+    """Use a seed to make direction selection deterministic."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    base_args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="3.0",
+        fps="10",
+    )
+
+    args_seeded = base_args + ["--emit-directions", "--direction-seed", "7"]
+    first = run_render_text_video(args_seeded, repo_root)
+    second = run_render_text_video(args_seeded, repo_root)
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+
+    first_payload = json.loads(first.stdout or "{}")
+    second_payload = json.loads(second.stdout or "{}")
+
+    assert first_payload["directions"] == second_payload["directions"]
+
+    args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
+    other = run_render_text_video(args_other_seed, repo_root)
+    assert other.returncode == 0
+
+    other_payload = json.loads(other.stdout or "{}")
+    assert other_payload["directions"] != first_payload["directions"]
