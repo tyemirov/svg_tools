@@ -4,6 +4,8 @@ assets/
 data/inputs
 
 PLAN.md
+__pycache__/
+*.pyc
 
 # Test coverage files
 *.out

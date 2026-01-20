@@ -1,6 +1,6 @@
 # SVG Tools
 
-A collection of utilities for working with images and SVGs. Each script is a self-contained executable
+A collection of utilities for working with images, video and SVGs. Each script is a self-contained executable
 with a `uv` shebang and inline [PEP 723](https://peps.python.org/pep-0723/) metadata.
 
 ---
@@ -189,6 +189,39 @@ HEIF/HEIC is supported via `pillow-heif`.
 | `--outline_low`, `--outline_high`    | Canny thresholds for the outline.              |
 | `--outline_min_area`                 | Minimum area for outline contours.             |
 | `--outline_width`, `--outline_color` | Outline stroke styling.                        |
+
+---
+
+### `render_text_video.py`
+
+Render animated word-by-word text into a transparent ProRes 4444 MOV.
+
+Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
+
+**Usage:**
+
+```shell
+./render_text_video.py \
+    --input-text-file <PATH> \
+    --output-video-file <PATH.mov> \
+    --width <PIXELS> \
+    --height <PIXELS> \
+    --duration-seconds <FLOAT> \
+    [--fps <INT>] \
+    [--background <transparent|#RRGGBB>] \
+    [--fonts-dir <PATH>] \
+    [--direction-seed <INT>] \
+    [--emit-directions]
+```
+
+**Notes**
+
+* Input text must be valid UTF-8 and is split on whitespace.
+* `.srt` input files are parsed as subtitle windows; words render only inside each time range.
+* `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
+* `--direction-seed` makes direction selection deterministic for a given seed.
+* `--emit-directions` prints a JSON direction list and exits without rendering.
+* Output is always a `.mov` file; default name is `video.mov`.
 
 ---
 
