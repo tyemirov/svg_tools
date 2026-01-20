@@ -209,13 +209,18 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
     --duration-seconds <FLOAT> \
     [--fps <INT>] \
     [--background <transparent|#RRGGBB>] \
-    [--fonts-dir <PATH>]
+    [--fonts-dir <PATH>] \
+    [--direction-seed <INT>] \
+    [--emit-directions]
 ```
 
 **Notes**
 
 * Input text must be valid UTF-8 and is split on whitespace.
+* `.srt` input files are parsed as subtitle windows; words render only inside each time range.
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
+* `--direction-seed` makes direction selection deterministic for a given seed.
+* `--emit-directions` prints a JSON direction list and exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
 
 ---

@@ -5,54 +5,99 @@
 #   "pillow>=10"
 # ]
 # ///
+"""Render animated word-by-word text into a ProRes MOV."""
+
+from __future__ import annotations
+
 import argparse
+import json
+import logging
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+from domain.text_video import (
+    EMPTY_TEXT_CODE,
+    FONT_DIR_CODE,
+    FONT_LOAD_CODE,
+    INPUT_FILE_CODE,
+    INVALID_COLOR_CODE,
+    RenderConfig,
+    RenderValidationError,
+    SubtitleWindow,
+    SRT_TIME_RANGE_PATTERN,
+    tokenize_words,
+    parse_srt,
+)
+from service.render_plan import RenderPlan, build_render_plan
 
-@dataclass(frozen=True)
-class RenderConfig:
-    input_text_file: str
-    output_video_file: str
-    width: int
-    height: int
-    duration_seconds: float
-    fps: int
-    background_rgba: Tuple[int, int, int, int]
-    fonts_dir: str
+
+DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
+LOGGER = logging.getLogger("render_text_video")
+
+FFMPEG_NOT_FOUND_CODE = "render_text_video.ffmpeg.not_found"
+FFMPEG_EXEC_CODE = "render_text_video.ffmpeg.exec_error"
+FFMPEG_UNSUPPORTED_CODE = "render_text_video.ffmpeg.unsupported"
+FFMPEG_PROCESS_CODE = "render_text_video.ffmpeg.process_failed"
+INTERNAL_DIRECTION_CODE = "render_text_video.internal.invalid_direction"
+
+
+class RenderPipelineError(RuntimeError):
+    """Runtime error with a stable error code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
 class WordStyle:
+    """Style definition for a single word."""
+
     font: ImageFont.FreeTypeFont
     color_rgba: Tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
 class WordToken:
+    """Word text paired with its rendering style."""
+
     text: str
     style: WordStyle
 
 
-DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
+@dataclass(frozen=True)
+class RenderRequest:
+    """Parsed CLI request and runtime options."""
+
+    config: RenderConfig
+    direction_seed: int | None
+    emit_directions: bool
+
+
+def configure_logging() -> None:
+    """Configure logging for CLI output."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 def parse_hex_color_to_rgba(color_value: str) -> Tuple[int, int, int, int]:
+    """Parse a color token into an RGBA tuple."""
     normalized = color_value.strip()
     if normalized.lower() == "transparent":
         return (0, 0, 0, 0)
 
     match_value = re.fullmatch(r"#([0-9a-fA-F]{6})", normalized)
     if not match_value:
-        raise ValueError(
-            f"Invalid color value: {color_value!r}. Use 'transparent' or '#RRGGBB'."
+        raise RenderValidationError(
+            INVALID_COLOR_CODE,
+            f"invalid color value: {color_value!r}",
         )
 
     rgb_hex = match_value.group(1)
@@ -63,9 +108,10 @@ def parse_hex_color_to_rgba(color_value: str) -> Tuple[int, int, int, int]:
 
 
 def ensure_ffmpeg_available() -> None:
+    """Ensure ffmpeg is installed and executable."""
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
-        raise RuntimeError("ffmpeg is not installed or not on PATH.")
+        raise RenderPipelineError(FFMPEG_NOT_FOUND_CODE, "ffmpeg not on PATH")
     try:
         subprocess.run(
             [ffmpeg_path, "-version"],
@@ -74,51 +120,53 @@ def ensure_ffmpeg_available() -> None:
             check=True,
         )
     except Exception as exc:
-        raise RuntimeError("ffmpeg exists but could not be executed.") from exc
+        raise RenderPipelineError(
+            FFMPEG_EXEC_CODE, "ffmpeg exists but could not be executed"
+        ) from exc
 
 
 def read_utf8_text_strict(file_path: str) -> str:
+    """Read a UTF-8 file with strict decoding."""
     try:
         with open(file_path, "rb") as file_handle:
             file_bytes = file_handle.read()
     except FileNotFoundError as exc:
-        raise RuntimeError(f"Input text file not found: {file_path}") from exc
+        raise RenderValidationError(
+            INPUT_FILE_CODE, f"input text file not found: {file_path}"
+        ) from exc
 
     try:
         return file_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise RuntimeError(
-            "Input text file is not valid UTF-8. "
-            f"Decode error at byte offset {exc.start}: {exc.reason}."
+        raise RenderValidationError(
+            INPUT_FILE_CODE,
+            f"input text file is not valid UTF-8 at byte offset {exc.start}",
         ) from exc
 
 
-def tokenize_words(text_value: str) -> List[str]:
-    stripped_text = text_value.replace("\ufeff", "").strip()
-    if not stripped_text:
-        return []
-    return stripped_text.split()
-
-
-def list_font_files(fonts_dir: str) -> List[str]:
+def list_font_files(fonts_dir: str) -> list[str]:
+    """List font files from the fonts directory."""
     if not os.path.isdir(fonts_dir):
-        raise RuntimeError(f"Fonts directory does not exist: {fonts_dir}")
+        raise RenderValidationError(
+            FONT_DIR_CODE, f"fonts directory does not exist: {fonts_dir}"
+        )
 
-    font_files: List[str] = []
+    font_files: list[str] = []
     for entry_name in sorted(os.listdir(fonts_dir)):
         lower_name = entry_name.lower()
         if lower_name.endswith(".ttf") or lower_name.endswith(".otf"):
             font_files.append(os.path.join(fonts_dir, entry_name))
 
     if not font_files:
-        raise RuntimeError(
-            f"No font files found in {fonts_dir}. "
-            "Place open-source .ttf/.otf fonts there (bold variants recommended)."
+        raise RenderValidationError(
+            FONT_DIR_CODE,
+            f"no font files found in {fonts_dir}",
         )
     return font_files
 
 
-def build_palette_rgba() -> List[Tuple[int, int, int, int]]:
+def build_palette_rgba() -> list[Tuple[int, int, int, int]]:
+    """Build the default RGBA palette."""
     return [
         (255, 255, 255, 255),
         (255, 80, 80, 255),
@@ -132,13 +180,15 @@ def build_palette_rgba() -> List[Tuple[int, int, int, int]]:
 
 
 def compute_font_size(width: int, height: int) -> int:
+    """Compute a font size based on frame dimensions."""
     base_value = max(24, min(width, height) // 8)
     return int(base_value)
 
 
-def load_fonts(font_files: List[str], font_size: int) -> List[ImageFont.FreeTypeFont]:
-    loaded_fonts: List[ImageFont.FreeTypeFont] = []
-    last_error: Optional[Exception] = None
+def load_fonts(font_files: Sequence[str], font_size: int) -> list[ImageFont.FreeTypeFont]:
+    """Load fonts from paths at the requested size."""
+    loaded_fonts: list[ImageFont.FreeTypeFont] = []
+    last_error: Exception | None = None
     for font_file_path in font_files:
         try:
             loaded_fonts.append(
@@ -150,18 +200,19 @@ def load_fonts(font_files: List[str], font_size: int) -> List[ImageFont.FreeType
             last_error = exc
 
     if not loaded_fonts:
-        raise RuntimeError(
-            "Failed to load any fonts from fonts directory."
+        raise RenderValidationError(
+            FONT_LOAD_CODE, "failed to load any fonts from fonts directory"
         ) from last_error
     return loaded_fonts
 
 
 def build_tokens(
-    words: List[str],
-    fonts: List[ImageFont.FreeTypeFont],
-    palette: List[Tuple[int, int, int, int]],
-) -> List[WordToken]:
-    tokens: List[WordToken] = []
+    words: Sequence[str],
+    fonts: Sequence[ImageFont.FreeTypeFont],
+    palette: Sequence[Tuple[int, int, int, int]],
+) -> list[WordToken]:
+    """Create styled tokens for each word."""
+    tokens: list[WordToken] = []
     for index_value, word_text in enumerate(words):
         font_value = fonts[index_value % len(fonts)]
         color_value = palette[index_value % len(palette)]
@@ -176,6 +227,7 @@ def build_tokens(
 def measure_text(
     draw_context: ImageDraw.ImageDraw, token: WordToken
 ) -> Tuple[int, int, int, int]:
+    """Measure a token bounding box."""
     return draw_context.textbbox(
         (0, 0), token.text, font=token.style.font, stroke_width=0
     )
@@ -189,6 +241,7 @@ def compute_position_for_frame(
     text_width: int,
     text_height: int,
 ) -> Tuple[int, int]:
+    """Compute a text position given a motion direction and progress."""
     clamped_progress = min(1.0, max(0.0, progress_value))
     center_x = (frame_width - text_width) // 2
     center_y = (frame_height - text_height) // 2
@@ -217,13 +270,11 @@ def compute_position_for_frame(
         y_value = int(round(start_y + (end_y - start_y) * clamped_progress))
         return (center_x, y_value)
 
-    raise RuntimeError(f"Unsupported direction: {direction}")
+    raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
 
 
-def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen:
-    if not config.output_video_file.lower().endswith(".mov"):
-        raise RuntimeError("Output must be .mov (MOV only).")
-
+def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
+    """Start ffmpeg for a raw RGBA frame stream."""
     ensure_ffmpeg_available()
 
     ffmpeg_cmd = [
@@ -259,69 +310,122 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen:
             stderr=subprocess.PIPE,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg not found on PATH.") from exc
+        raise RenderPipelineError(FFMPEG_NOT_FOUND_CODE, "ffmpeg not found") from exc
 
 
-def render_video(config: RenderConfig) -> None:
+def build_subtitle_windows(
+    config: RenderConfig, text_value: str
+) -> Tuple[SubtitleWindow, ...]:
+    """Build subtitle windows from plain text or SRT input."""
+    is_srt_extension = config.input_text_file.lower().endswith(".srt")
+    is_srt_content = any(
+        SRT_TIME_RANGE_PATTERN.fullmatch(line.strip())
+        for line in text_value.splitlines()
+        if line.strip()
+    )
+    if is_srt_extension or is_srt_content:
+        return parse_srt(text_value)
+
+    words = tokenize_words(text_value)
+    return (
+        SubtitleWindow(
+            start_seconds=0.0,
+            end_seconds=config.duration_seconds,
+            words=words,
+        ),
+    )
+
+
+def build_render_plan_from_input(config: RenderConfig) -> RenderPlan:
+    """Load input text and build a render plan."""
     input_text = read_utf8_text_strict(config.input_text_file)
-    words = tokenize_words(input_text)
-    if not words:
-        raise RuntimeError("Input text file contains no words after trimming.")
+    windows = build_subtitle_windows(config, input_text)
+    return build_render_plan(
+        windows=windows,
+        fps=config.fps,
+        duration_seconds=config.duration_seconds,
+    )
 
+
+def build_render_tokens(plan: RenderPlan, config: RenderConfig) -> list[WordToken]:
+    """Build word tokens from a render plan."""
     palette = build_palette_rgba()
     font_files = list_font_files(config.fonts_dir)
     font_size = compute_font_size(config.width, config.height)
     fonts = load_fonts(font_files, font_size=font_size)
-    tokens = build_tokens(words, fonts=fonts, palette=palette)
+    return build_tokens(plan.words, fonts=fonts, palette=palette)
 
-    total_frames = int(round(config.duration_seconds * config.fps))
-    if total_frames <= 0:
-        raise RuntimeError(
-            "Duration and FPS produce zero frames. Increase duration or FPS."
-        )
 
-    word_count = len(tokens)
-    frames_per_word = max(1, total_frames // word_count)
-    effective_total_frames = frames_per_word * word_count
+def select_directions(word_count: int, rng: random.Random) -> Tuple[str, ...]:
+    """Select random directions for each word."""
+    return tuple(rng.choice(DIRECTIONS) for _ in range(word_count))
 
+
+def emit_directions(directions: Sequence[str]) -> None:
+    """Emit direction choices to stdout."""
+    payload = {"directions": list(directions)}
+    sys.stdout.write(json.dumps(payload, ensure_ascii=True))
+
+
+def render_video(
+    config: RenderConfig,
+    plan: RenderPlan,
+    tokens: Sequence[WordToken],
+    directions: Sequence[str],
+) -> None:
+    """Render frames based on the render plan."""
     ffmpeg_process = open_ffmpeg_process(config)
     if not ffmpeg_process.stdin:
-        raise RuntimeError("Failed to open ffmpeg stdin pipe.")
+        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
+
+    schedule_index = 0
+    current_schedule = None
 
     try:
-        for frame_index in range(effective_total_frames):
-            token_index = frame_index // frames_per_word
-            token = tokens[min(token_index, word_count - 1)]
-
-            within_word_index = frame_index % frames_per_word
-            progress = within_word_index / float(max(1, frames_per_word - 1))
-
-            direction = DIRECTIONS[token_index % len(DIRECTIONS)]
+        for frame_index in range(plan.total_frames):
+            if schedule_index < len(plan.scheduled_words):
+                schedule = plan.scheduled_words[schedule_index]
+                schedule_end = schedule.start_frame + schedule.frame_count
+                if frame_index >= schedule_end:
+                    schedule_index += 1
+                    current_schedule = None
+                if schedule_index < len(plan.scheduled_words):
+                    schedule = plan.scheduled_words[schedule_index]
+                    if frame_index >= schedule.start_frame:
+                        current_schedule = schedule
 
             frame_image = Image.new(
                 "RGBA", (config.width, config.height), color=config.background_rgba
             )
             draw_context = ImageDraw.Draw(frame_image)
 
-            bbox = measure_text(draw_context, token)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
+            if current_schedule is not None:
+                token = tokens[current_schedule.token_index]
+                within_word_index = frame_index - current_schedule.start_frame
+                progress = within_word_index / float(
+                    max(1, current_schedule.frame_count - 1)
+                )
+                direction = directions[current_schedule.token_index]
 
-            pos_x, pos_y = compute_position_for_frame(
-                direction=direction,
-                progress_value=progress,
-                frame_width=config.width,
-                frame_height=config.height,
-                text_width=text_width,
-                text_height=text_height,
-            )
+                bbox = measure_text(draw_context, token)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
 
-            draw_context.text(
-                (pos_x, pos_y),
-                token.text,
-                font=token.style.font,
-                fill=token.style.color_rgba,
-            )
+                pos_x, pos_y = compute_position_for_frame(
+                    direction=direction,
+                    progress_value=progress,
+                    frame_width=config.width,
+                    frame_height=config.height,
+                    text_width=text_width,
+                    text_height=text_height,
+                )
+
+                draw_context.text(
+                    (pos_x, pos_y),
+                    token.text,
+                    font=token.style.font,
+                    fill=token.style.color_rgba,
+                )
 
             ffmpeg_process.stdin.write(frame_image.tobytes())
 
@@ -331,8 +435,9 @@ def render_video(config: RenderConfig) -> None:
 
         if return_code != 0:
             stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"ffmpeg failed with exit code {return_code}.\n{stderr_text}"
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE,
+                f"ffmpeg failed with exit code {return_code}. {stderr_text}",
             )
 
     finally:
@@ -348,7 +453,8 @@ def render_video(config: RenderConfig) -> None:
             pass
 
 
-def parse_args(argv: List[str]) -> RenderConfig:
+def parse_args(argv: Sequence[str]) -> RenderRequest:
+    """Parse CLI arguments into a RenderRequest."""
     parser = argparse.ArgumentParser(prog="render_text_video.py", add_help=True)
     parser.add_argument("--input-text-file", required=True)
     parser.add_argument("--output-video-file", default="video.mov")
@@ -360,19 +466,13 @@ def parse_args(argv: List[str]) -> RenderConfig:
         "--background", default="transparent", help="transparent (default) or #RRGGBB"
     )
     parser.add_argument("--fonts-dir", default="fonts")
+    parser.add_argument("--direction-seed", type=int, default=None)
+    parser.add_argument("--emit-directions", action="store_true")
 
     parsed = parser.parse_args(argv)
-
-    if parsed.width <= 0 or parsed.height <= 0:
-        raise RuntimeError("Width and height must be positive integers.")
-    if parsed.fps <= 0:
-        raise RuntimeError("FPS must be a positive integer.")
-    if parsed.duration_seconds <= 0:
-        raise RuntimeError("Duration must be > 0 seconds.")
-
     background_rgba = parse_hex_color_to_rgba(parsed.background)
 
-    return RenderConfig(
+    config = RenderConfig(
         input_text_file=parsed.input_text_file,
         output_video_file=parsed.output_video_file,
         width=parsed.width,
@@ -383,8 +483,15 @@ def parse_args(argv: List[str]) -> RenderConfig:
         fonts_dir=parsed.fonts_dir,
     )
 
+    return RenderRequest(
+        config=config,
+        direction_seed=parsed.direction_seed,
+        emit_directions=parsed.emit_directions,
+    )
+
 
 def validate_ffmpeg_capabilities() -> None:
+    """Validate ffmpeg encoders and pixel formats required for ProRes."""
     try:
         version_result = subprocess.run(
             ["ffmpeg", "-version"],
@@ -394,10 +501,14 @@ def validate_ffmpeg_capabilities() -> None:
             text=True,
         )
     except Exception as exc:
-        raise RuntimeError("ffmpeg is not available or not executable.") from exc
+        raise RenderPipelineError(
+            FFMPEG_NOT_FOUND_CODE, "ffmpeg is not available"
+        ) from exc
 
     if "ffmpeg version" not in version_result.stdout.lower():
-        raise RuntimeError("ffmpeg version output is unexpected.")
+        raise RenderPipelineError(
+            FFMPEG_EXEC_CODE, "ffmpeg version output is unexpected"
+        )
 
     encoders_result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-encoders"],
@@ -407,8 +518,9 @@ def validate_ffmpeg_capabilities() -> None:
         check=True,
     )
     if "prores_ks" not in encoders_result.stdout:
-        raise RuntimeError(
-            "ffmpeg does not support prores_ks encoder (required for ProRes 4444)."
+        raise RenderPipelineError(
+            FFMPEG_UNSUPPORTED_CODE,
+            "ffmpeg does not support prores_ks encoder",
         )
 
     pixfmts_result = subprocess.run(
@@ -419,19 +531,36 @@ def validate_ffmpeg_capabilities() -> None:
         check=True,
     )
     if "yuva444p10le" not in pixfmts_result.stdout:
-        raise RuntimeError(
-            "ffmpeg does not support yuva444p10le pixel format (alpha required)."
+        raise RenderPipelineError(
+            FFMPEG_UNSUPPORTED_CODE,
+            "ffmpeg does not support yuva444p10le pixel format",
         )
 
 
 def main() -> int:
+    """CLI entrypoint."""
+    configure_logging()
+
     try:
-        config = parse_args(sys.argv[1:])
+        request = parse_args(sys.argv[1:])
+        plan = build_render_plan_from_input(request.config)
+        rng = random.Random(request.direction_seed)
+        directions = select_directions(len(plan.words), rng)
+        if request.emit_directions:
+            emit_directions(directions)
+            return 0
         validate_ffmpeg_capabilities()
-        render_video(config)
+        tokens = build_render_tokens(plan, request.config)
+        render_video(request.config, plan, tokens, directions)
         return 0
+    except RenderValidationError as exc:
+        LOGGER.error("%s: %s", exc.code, str(exc).strip())
+        return 1
+    except RenderPipelineError as exc:
+        LOGGER.error("%s: %s", exc.code, str(exc).strip())
+        return 1
     except Exception as exc:
-        sys.stderr.write(str(exc).strip() + "\n")
+        LOGGER.error("render_text_video.unhandled_error: %s", str(exc).strip())
         return 1
 
 
