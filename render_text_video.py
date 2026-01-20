@@ -165,6 +165,32 @@ def list_font_files(fonts_dir: str) -> list[str]:
     return font_files
 
 
+def filter_loadable_fonts(font_files: Sequence[str], sample_size: int) -> list[str]:
+    """Filter font files to those loadable at the sample size."""
+    loadable_fonts: list[str] = []
+    for font_file_path in font_files:
+        try:
+            ImageFont.truetype(
+                font_file_path, size=sample_size, layout_engine=ImageFont.Layout.BASIC
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "%s: skipped font %s (%s)",
+                FONT_LOAD_CODE,
+                font_file_path,
+                str(exc).strip(),
+            )
+            continue
+        loadable_fonts.append(font_file_path)
+
+    if not loadable_fonts:
+        raise RenderValidationError(
+            FONT_LOAD_CODE, "failed to load any fonts from fonts directory"
+        )
+
+    return loadable_fonts
+
+
 def build_palette_rgba() -> list[Tuple[int, int, int, int]]:
     """Build the default RGBA palette."""
     return [
@@ -179,42 +205,58 @@ def build_palette_rgba() -> list[Tuple[int, int, int, int]]:
     ]
 
 
-def compute_font_size(width: int, height: int) -> int:
-    """Compute a font size based on frame dimensions."""
-    base_value = max(24, min(width, height) // 8)
-    return int(base_value)
+def compute_font_size_range(width: int, height: int) -> Tuple[int, int]:
+    """Compute the minimum and maximum font size for the frame."""
+    min_dimension = min(width, height)
+    base_size = max(24, min_dimension // 8)
+    min_size = max(32, base_size + 4, min_dimension // 5)
+    max_size = max(min_size * 2, int(min_dimension * 2.0))
+    return min_size, max_size
 
 
-def load_fonts(font_files: Sequence[str], font_size: int) -> list[ImageFont.FreeTypeFont]:
-    """Load fonts from paths at the requested size."""
-    loaded_fonts: list[ImageFont.FreeTypeFont] = []
-    last_error: Exception | None = None
-    for font_file_path in font_files:
-        try:
-            loaded_fonts.append(
-                ImageFont.truetype(
-                    font_file_path, size=font_size, layout_engine=ImageFont.Layout.BASIC
-                )
-            )
-        except Exception as exc:
-            last_error = exc
+def select_font_sizes(
+    word_count: int, config: RenderConfig, rng: random.Random
+) -> Tuple[int, ...]:
+    """Select randomized font sizes for each word."""
+    min_size, max_size = compute_font_size_range(config.width, config.height)
+    return tuple(rng.randint(min_size, max_size) for _ in range(word_count))
 
-    if not loaded_fonts:
+
+def load_font_cached(
+    font_file_path: str,
+    font_size: int,
+    cache: dict[Tuple[str, int], ImageFont.FreeTypeFont],
+) -> ImageFont.FreeTypeFont:
+    """Load a font and cache by path and size."""
+    cache_key = (font_file_path, font_size)
+    cached_font = cache.get(cache_key)
+    if cached_font is not None:
+        return cached_font
+    try:
+        font = ImageFont.truetype(
+            font_file_path, size=font_size, layout_engine=ImageFont.Layout.BASIC
+        )
+    except Exception as exc:
         raise RenderValidationError(
-            FONT_LOAD_CODE, "failed to load any fonts from fonts directory"
-        ) from last_error
-    return loaded_fonts
+            FONT_LOAD_CODE, f"failed to load font {font_file_path} at size {font_size}"
+        ) from exc
+    cache[cache_key] = font
+    return font
 
 
 def build_tokens(
     words: Sequence[str],
-    fonts: Sequence[ImageFont.FreeTypeFont],
+    font_files: Sequence[str],
     palette: Sequence[Tuple[int, int, int, int]],
+    font_sizes: Sequence[int],
 ) -> list[WordToken]:
     """Create styled tokens for each word."""
     tokens: list[WordToken] = []
+    font_cache: dict[Tuple[str, int], ImageFont.FreeTypeFont] = {}
     for index_value, word_text in enumerate(words):
-        font_value = fonts[index_value % len(fonts)]
+        font_file_path = font_files[index_value % len(font_files)]
+        font_size = font_sizes[index_value]
+        font_value = load_font_cached(font_file_path, font_size, font_cache)
         color_value = palette[index_value % len(palette)]
         tokens.append(
             WordToken(
@@ -347,13 +389,16 @@ def build_render_plan_from_input(config: RenderConfig) -> RenderPlan:
     )
 
 
-def build_render_tokens(plan: RenderPlan, config: RenderConfig) -> list[WordToken]:
+def build_render_tokens(
+    plan: RenderPlan, config: RenderConfig, font_sizes: Sequence[int]
+) -> list[WordToken]:
     """Build word tokens from a render plan."""
     palette = build_palette_rgba()
     font_files = list_font_files(config.fonts_dir)
-    font_size = compute_font_size(config.width, config.height)
-    fonts = load_fonts(font_files, font_size=font_size)
-    return build_tokens(plan.words, fonts=fonts, palette=palette)
+    font_files = filter_loadable_fonts(font_files, min(font_sizes))
+    return build_tokens(
+        plan.words, font_files=font_files, palette=palette, font_sizes=font_sizes
+    )
 
 
 def select_directions(word_count: int, rng: random.Random) -> Tuple[str, ...]:
@@ -361,9 +406,9 @@ def select_directions(word_count: int, rng: random.Random) -> Tuple[str, ...]:
     return tuple(rng.choice(DIRECTIONS) for _ in range(word_count))
 
 
-def emit_directions(directions: Sequence[str]) -> None:
+def emit_directions(directions: Sequence[str], font_sizes: Sequence[int]) -> None:
     """Emit direction choices to stdout."""
-    payload = {"directions": list(directions)}
+    payload = {"directions": list(directions), "font_sizes": list(font_sizes)}
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
 
 
@@ -546,11 +591,12 @@ def main() -> int:
         plan = build_render_plan_from_input(request.config)
         rng = random.Random(request.direction_seed)
         directions = select_directions(len(plan.words), rng)
+        font_sizes = select_font_sizes(len(plan.words), request.config, rng)
         if request.emit_directions:
-            emit_directions(directions)
+            emit_directions(directions, font_sizes)
             return 0
         validate_ffmpeg_capabilities()
-        tokens = build_render_tokens(plan, request.config)
+        tokens = build_render_tokens(plan, request.config, font_sizes)
         render_video(request.config, plan, tokens, directions)
         return 0
     except RenderValidationError as exc:

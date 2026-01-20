@@ -54,6 +54,15 @@ def build_common_args(
     ]
 
 
+def expected_font_size_range(width: int, height: int) -> tuple[int, int]:
+    """Compute the expected font size range for a frame size."""
+    min_dimension = min(width, height)
+    base_size = max(24, min_dimension // 8)
+    min_size = max(32, base_size + 4, min_dimension // 5)
+    max_size = max(min_size * 2, int(min_dimension * 2.0))
+    return min_size, max_size
+
+
 def test_srt_window_too_small(tmp_path: Path) -> None:
     """Fail when an SRT window is too short for its words."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -138,6 +147,11 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     second_payload = json.loads(second.stdout or "{}")
 
     assert first_payload["directions"] == second_payload["directions"]
+    assert first_payload["font_sizes"] == second_payload["font_sizes"]
+
+    expected_min_size, expected_max_size = expected_font_size_range(64, 64)
+    for font_size in first_payload["font_sizes"]:
+        assert expected_min_size <= font_size <= expected_max_size
 
     args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
     other = run_render_text_video(args_other_seed, repo_root)
@@ -145,3 +159,4 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
 
     other_payload = json.loads(other.stdout or "{}")
     assert other_payload["directions"] != first_payload["directions"]
+    assert other_payload["font_sizes"] != first_payload["font_sizes"]

@@ -220,7 +220,8 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 * `.srt` input files are parsed as subtitle windows; words render only inside each time range.
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
-* `--emit-directions` prints a JSON direction list and exits without rendering.
+* Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
+* `--emit-directions` prints JSON with `directions` and `font_sizes`, then exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
 
 ---
