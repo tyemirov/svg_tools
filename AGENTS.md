@@ -1,8 +1,8 @@
 # AGENTS.md
 
-## <Repo/App name>
+## SVG Tools
 
-<App purpose description. What does it do>. See README.md for details
+A collection of utilities for working with images, video and SVGs. See README.md for details
 
 ## Document Roles
 

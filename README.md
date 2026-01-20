@@ -1,6 +1,6 @@
 # SVG Tools
 
-A collection of utilities for working with images and SVGs. Each script is a self-contained executable
+A collection of utilities for working with images, video and SVGs. Each script is a self-contained executable
 with a `uv` shebang and inline [PEP 723](https://peps.python.org/pep-0723/) metadata.
 
 ---
