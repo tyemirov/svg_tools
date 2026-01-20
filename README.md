@@ -204,8 +204,9 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 ./render_text_video.py \
     --input-text-file <PATH> \
     --output-video-file <PATH.mov> \
-    --width <PIXELS> \
-    --height <PIXELS> \
+    [--width <PIXELS>] \
+    [--height <PIXELS>] \
+    [--background-image <PATH>] \
     --duration-seconds <FLOAT> \
     [--fps <INT>] \
     [--background <transparent|#RRGGBB>] \
@@ -219,9 +220,11 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 
 * Input text must be valid UTF-8 and is split on whitespace.
 * `.srt` input files are parsed as subtitle windows; words render only inside each time range.
+* Provide either `--background-image` or `--width`/`--height` (image derives dimensions).
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
 * `--remove-punctuation` strips punctuation from words before rendering.
+* `--background` applies only when no background image is used.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
 * Vertical directions animate letters with staggered offsets (so letters move independently).
 * `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, and `letter_offsets`, then exits without rendering.

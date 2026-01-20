@@ -15,6 +15,7 @@ EMPTY_TEXT_CODE = "render_text_video.input.empty_text"
 INPUT_FILE_CODE = "render_text_video.input.file_error"
 FONT_DIR_CODE = "render_text_video.input.fonts_missing"
 FONT_LOAD_CODE = "render_text_video.input.fonts_unloadable"
+BACKGROUND_IMAGE_CODE = "render_text_video.input.background_image"
 
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2},\d{3})$"
@@ -42,6 +43,7 @@ class RenderConfig:
     fps: int
     background_rgba: Tuple[int, int, int, int]
     fonts_dir: str
+    background_image_path: str | None
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -65,6 +67,10 @@ class RenderConfig:
                 raise RenderValidationError(
                     INVALID_CONFIG_CODE, "background_rgba channel out of range"
                 )
+        if self.background_image_path is not None and not self.background_image_path.strip():
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "background_image_path must be non-empty"
+            )
 
 
 @dataclass(frozen=True)

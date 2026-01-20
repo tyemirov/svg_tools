@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import struct
 import subprocess
+import zlib
 from pathlib import Path
 from typing import List
 
@@ -24,6 +26,31 @@ def write_srt_file(target_path: Path, content: str) -> None:
     target_path.write_text(content, encoding="utf-8")
 
 
+def write_png(
+    target_path: Path, width: int, height: int, color: tuple[int, int, int, int]
+) -> None:
+    """Write a solid-color RGBA PNG using the standard library."""
+
+    def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+        length = struct.pack(">I", len(data))
+        crc = struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+        return length + chunk_type + data + crc
+
+    row = bytes([0]) + bytes(color) * width
+    raw = row * height
+    compressed = zlib.compress(raw)
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    png_bytes = (
+        signature
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", compressed)
+        + png_chunk(b"IEND", b"")
+    )
+    target_path.write_bytes(png_bytes)
+
+
 def build_common_args(
     script_path: Path,
     input_path: Path,
@@ -31,18 +58,15 @@ def build_common_args(
     fonts_dir: Path,
     duration_seconds: str,
     fps: str,
+    include_dimensions: bool = True,
 ) -> List[str]:
     """Build common CLI arguments for render_text_video.py."""
-    return [
+    args = [
         str(script_path),
         "--input-text-file",
         str(input_path),
         "--output-video-file",
         str(output_path),
-        "--width",
-        "64",
-        "--height",
-        "64",
         "--duration-seconds",
         duration_seconds,
         "--fps",
@@ -52,6 +76,9 @@ def build_common_args(
         "--fonts-dir",
         str(fonts_dir),
     ]
+    if include_dimensions:
+        args.extend(["--width", "64", "--height", "64"])
+    return args
 
 
 def expected_font_size_range(width: int, height: int) -> tuple[int, int]:
@@ -207,3 +234,103 @@ def test_remove_punctuation(tmp_path: Path) -> None:
         "punctuation...",
         "OK?",
     ]
+
+
+def test_background_image_derives_dimensions(tmp_path: Path) -> None:
+    """Use background image to derive frame dimensions."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    background_path = tmp_path / "background.png"
+    write_png(background_path, 10, 12, (20, 40, 60, 255))
+
+    output_path = tmp_path / "out.mov"
+    base_args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="3.0",
+        fps="10",
+        include_dimensions=False,
+    )
+
+    args = base_args + [
+        "--background-image",
+        str(background_path),
+        "--emit-directions",
+        "--direction-seed",
+        "7",
+    ]
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+
+    payload = json.loads(result.stdout or "{}")
+    _, expected_max_size = expected_font_size_range(10, 12)
+    assert max(payload["font_sizes"]) <= expected_max_size
+
+
+def test_background_image_conflicts_with_dimensions(tmp_path: Path) -> None:
+    """Fail when background image and dimensions are both provided."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    background_path = tmp_path / "background.png"
+    write_png(background_path, 8, 8, (0, 0, 0, 255))
+
+    output_path = tmp_path / "out.mov"
+    base_args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="1.0",
+        fps="10",
+    )
+    args = base_args + ["--background-image", str(background_path), "--emit-directions"]
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
+
+
+def test_requires_dimensions_without_background(tmp_path: Path) -> None:
+    """Fail when no dimensions or background image are provided."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = [
+        str(script_path),
+        "--input-text-file",
+        str(input_path),
+        "--output-video-file",
+        str(output_path),
+        "--duration-seconds",
+        "1.0",
+        "--fps",
+        "10",
+        "--background",
+        "transparent",
+        "--fonts-dir",
+        str(fonts_dir),
+        "--emit-directions",
+    ]
+
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr

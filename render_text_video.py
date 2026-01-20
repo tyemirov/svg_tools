@@ -25,9 +25,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 from domain.text_video import (
     EMPTY_TEXT_CODE,
+    BACKGROUND_IMAGE_CODE,
     FONT_DIR_CODE,
     FONT_LOAD_CODE,
     INPUT_FILE_CODE,
+    INVALID_CONFIG_CODE,
     INVALID_COLOR_CODE,
     RenderConfig,
     RenderValidationError,
@@ -93,6 +95,7 @@ class RenderRequest:
     direction_seed: int | None
     emit_directions: bool
     remove_punctuation: bool
+    background_image: Image.Image | None
 
 
 def configure_logging() -> None:
@@ -176,6 +179,23 @@ def list_font_files(fonts_dir: str) -> list[str]:
             f"no font files found in {fonts_dir}",
         )
     return font_files
+
+
+def load_background_image(image_path: str) -> Image.Image:
+    """Load a background image as RGBA."""
+    try:
+        image = Image.open(image_path)
+    except FileNotFoundError as exc:
+        raise RenderValidationError(
+            BACKGROUND_IMAGE_CODE, f"background image not found: {image_path}"
+        ) from exc
+    except Exception as exc:
+        raise RenderValidationError(
+            BACKGROUND_IMAGE_CODE, f"failed to read background image: {image_path}"
+        ) from exc
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    return image
 
 
 def filter_loadable_fonts(font_files: Sequence[str], sample_size: int) -> list[str]:
@@ -473,6 +493,7 @@ def render_video(
     plan: RenderPlan,
     tokens: Sequence[WordToken],
     directions: Sequence[str],
+    background_image: Image.Image | None,
 ) -> None:
     """Render frames based on the render plan."""
     ffmpeg_process = open_ffmpeg_process(config)
@@ -501,9 +522,12 @@ def render_video(
                     if frame_index >= schedule.start_frame:
                         current_schedule = schedule
 
-            frame_image = Image.new(
-                "RGBA", (config.width, config.height), color=config.background_rgba
-            )
+            if background_image is None:
+                frame_image = Image.new(
+                    "RGBA", (config.width, config.height), color=config.background_rgba
+                )
+            else:
+                frame_image = background_image.copy()
             draw_context = ImageDraw.Draw(frame_image)
 
             if current_schedule is not None:
@@ -578,13 +602,14 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     parser = argparse.ArgumentParser(prog="render_text_video.py", add_help=True)
     parser.add_argument("--input-text-file", required=True)
     parser.add_argument("--output-video-file", default="video.mov")
-    parser.add_argument("--width", type=int, required=True)
-    parser.add_argument("--height", type=int, required=True)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--height", type=int)
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument(
         "--background", default="transparent", help="transparent (default) or #RRGGBB"
     )
+    parser.add_argument("--background-image", default=None)
     parser.add_argument("--fonts-dir", default="fonts")
     parser.add_argument("--direction-seed", type=int, default=None)
     parser.add_argument("--emit-directions", action="store_true")
@@ -592,16 +617,35 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
 
     parsed = parser.parse_args(argv)
     background_rgba = parse_hex_color_to_rgba(parsed.background)
+    background_image = None
+
+    if parsed.background_image:
+        if parsed.width is not None or parsed.height is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "width/height cannot be used with background-image",
+            )
+        background_image = load_background_image(parsed.background_image)
+        width, height = background_image.size
+    else:
+        if parsed.width is None or parsed.height is None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "width and height are required without background-image",
+            )
+        width = parsed.width
+        height = parsed.height
 
     config = RenderConfig(
         input_text_file=parsed.input_text_file,
         output_video_file=parsed.output_video_file,
-        width=parsed.width,
-        height=parsed.height,
+        width=width,
+        height=height,
         duration_seconds=parsed.duration_seconds,
         fps=parsed.fps,
         background_rgba=background_rgba,
         fonts_dir=parsed.fonts_dir,
+        background_image_path=parsed.background_image,
     )
 
     return RenderRequest(
@@ -609,6 +653,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         direction_seed=parsed.direction_seed,
         emit_directions=parsed.emit_directions,
         remove_punctuation=parsed.remove_punctuation,
+        background_image=background_image,
     )
 
 
@@ -680,7 +725,7 @@ def main() -> int:
             return 0
         validate_ffmpeg_capabilities()
         tokens = build_render_tokens(plan, request.config, font_sizes)
-        render_video(request.config, plan, tokens, directions)
+        render_video(request.config, plan, tokens, directions, request.background_image)
         return 0
     except RenderValidationError as exc:
         LOGGER.error("%s: %s", exc.code, str(exc).strip())
