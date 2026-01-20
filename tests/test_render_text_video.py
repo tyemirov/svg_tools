@@ -148,6 +148,7 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
 
     assert first_payload["directions"] == second_payload["directions"]
     assert first_payload["font_sizes"] == second_payload["font_sizes"]
+    assert first_payload["words"] == second_payload["words"]
 
     expected_min_size, expected_max_size = expected_font_size_range(64, 64)
     for font_size in first_payload["font_sizes"]:
@@ -160,3 +161,42 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     other_payload = json.loads(other.stdout or "{}")
     assert other_payload["directions"] != first_payload["directions"]
     assert other_payload["font_sizes"] != first_payload["font_sizes"]
+
+
+def test_remove_punctuation(tmp_path: Path) -> None:
+    """Strip punctuation when requested."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "Hello, world! (Testing) punctuation... OK?"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    base_args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="2.0",
+        fps="10",
+    )
+
+    args_strip = base_args + ["--emit-directions", "--remove-punctuation"]
+    stripped = run_render_text_video(args_strip, repo_root)
+    assert stripped.returncode == 0
+    stripped_payload = json.loads(stripped.stdout or "{}")
+    assert stripped_payload["words"] == ["Hello", "world", "Testing", "punctuation", "OK"]
+
+    args_keep = base_args + ["--emit-directions"]
+    kept = run_render_text_video(args_keep, repo_root)
+    assert kept.returncode == 0
+    kept_payload = json.loads(kept.stdout or "{}")
+    assert kept_payload["words"] == [
+        "Hello,",
+        "world!",
+        "(Testing)",
+        "punctuation...",
+        "OK?",
+    ]

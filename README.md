@@ -211,6 +211,7 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
     [--background <transparent|#RRGGBB>] \
     [--fonts-dir <PATH>] \
     [--direction-seed <INT>] \
+    [--remove-punctuation] \
     [--emit-directions]
 ```
 
@@ -220,8 +221,9 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 * `.srt` input files are parsed as subtitle windows; words render only inside each time range.
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
+* `--remove-punctuation` strips punctuation from words before rendering.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
-* `--emit-directions` prints JSON with `directions` and `font_sizes`, then exits without rendering.
+* `--emit-directions` prints JSON with `directions`, `font_sizes`, and `words`, then exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
 
 ---

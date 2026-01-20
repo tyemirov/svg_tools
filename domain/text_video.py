@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 from typing import Tuple
 
 INVALID_COLOR_CODE = "render_text_video.input.invalid_color"
@@ -89,12 +90,32 @@ class SubtitleWindow:
             )
 
 
-def tokenize_words(text_value: str) -> Tuple[str, ...]:
+def strip_punctuation(text_value: str) -> str:
+    """Remove unicode punctuation characters from text."""
+    return "".join(
+        character
+        for character in text_value
+        if not unicodedata.category(character).startswith("P")
+    )
+
+
+def tokenize_words(text_value: str, remove_punctuation: bool) -> Tuple[str, ...]:
     """Split text into whitespace-delimited words."""
     stripped_text = text_value.replace("\ufeff", "").strip()
     if not stripped_text:
         raise RenderValidationError(EMPTY_TEXT_CODE, "input text contains no words")
-    return tuple(stripped_text.split())
+
+    raw_words = stripped_text.split()
+    if remove_punctuation:
+        cleaned_words = [strip_punctuation(word) for word in raw_words]
+        words = [word for word in cleaned_words if word]
+    else:
+        words = raw_words
+
+    if not words:
+        raise RenderValidationError(EMPTY_TEXT_CODE, "input text contains no words")
+
+    return tuple(words)
 
 
 def parse_timecode(timecode_value: str) -> float:
@@ -108,7 +129,7 @@ def parse_timecode(timecode_value: str) -> float:
     return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
 
 
-def parse_srt(text_value: str) -> Tuple[SubtitleWindow, ...]:
+def parse_srt(text_value: str, remove_punctuation: bool) -> Tuple[SubtitleWindow, ...]:
     """Parse SRT content into subtitle windows."""
     normalized = text_value.replace("\ufeff", "").strip()
     if not normalized:
@@ -139,7 +160,7 @@ def parse_srt(text_value: str) -> Tuple[SubtitleWindow, ...]:
         if not subtitle_lines:
             raise RenderValidationError(INVALID_SRT_CODE, "SRT block missing text")
 
-        words = tokenize_words(" ".join(subtitle_lines))
+        words = tokenize_words(" ".join(subtitle_lines), remove_punctuation)
         windows.append(
             SubtitleWindow(
                 start_seconds=start_seconds, end_seconds=end_seconds, words=words

@@ -80,6 +80,7 @@ class RenderRequest:
     config: RenderConfig
     direction_seed: int | None
     emit_directions: bool
+    remove_punctuation: bool
 
 
 def configure_logging() -> None:
@@ -356,7 +357,7 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
 
 
 def build_subtitle_windows(
-    config: RenderConfig, text_value: str
+    config: RenderConfig, text_value: str, remove_punctuation: bool
 ) -> Tuple[SubtitleWindow, ...]:
     """Build subtitle windows from plain text or SRT input."""
     is_srt_extension = config.input_text_file.lower().endswith(".srt")
@@ -366,9 +367,9 @@ def build_subtitle_windows(
         if line.strip()
     )
     if is_srt_extension or is_srt_content:
-        return parse_srt(text_value)
+        return parse_srt(text_value, remove_punctuation)
 
-    words = tokenize_words(text_value)
+    words = tokenize_words(text_value, remove_punctuation)
     return (
         SubtitleWindow(
             start_seconds=0.0,
@@ -378,10 +379,12 @@ def build_subtitle_windows(
     )
 
 
-def build_render_plan_from_input(config: RenderConfig) -> RenderPlan:
+def build_render_plan_from_input(
+    config: RenderConfig, remove_punctuation: bool
+) -> RenderPlan:
     """Load input text and build a render plan."""
     input_text = read_utf8_text_strict(config.input_text_file)
-    windows = build_subtitle_windows(config, input_text)
+    windows = build_subtitle_windows(config, input_text, remove_punctuation)
     return build_render_plan(
         windows=windows,
         fps=config.fps,
@@ -406,9 +409,17 @@ def select_directions(word_count: int, rng: random.Random) -> Tuple[str, ...]:
     return tuple(rng.choice(DIRECTIONS) for _ in range(word_count))
 
 
-def emit_directions(directions: Sequence[str], font_sizes: Sequence[int]) -> None:
+def emit_directions(
+    directions: Sequence[str],
+    font_sizes: Sequence[int],
+    words: Sequence[str],
+) -> None:
     """Emit direction choices to stdout."""
-    payload = {"directions": list(directions), "font_sizes": list(font_sizes)}
+    payload = {
+        "directions": list(directions),
+        "font_sizes": list(font_sizes),
+        "words": list(words),
+    }
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
 
 
@@ -513,6 +524,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     parser.add_argument("--fonts-dir", default="fonts")
     parser.add_argument("--direction-seed", type=int, default=None)
     parser.add_argument("--emit-directions", action="store_true")
+    parser.add_argument("--remove-punctuation", action="store_true")
 
     parsed = parser.parse_args(argv)
     background_rgba = parse_hex_color_to_rgba(parsed.background)
@@ -532,6 +544,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         config=config,
         direction_seed=parsed.direction_seed,
         emit_directions=parsed.emit_directions,
+        remove_punctuation=parsed.remove_punctuation,
     )
 
 
@@ -588,12 +601,14 @@ def main() -> int:
 
     try:
         request = parse_args(sys.argv[1:])
-        plan = build_render_plan_from_input(request.config)
+        plan = build_render_plan_from_input(
+            request.config, request.remove_punctuation
+        )
         rng = random.Random(request.direction_seed)
         directions = select_directions(len(plan.words), rng)
         font_sizes = select_font_sizes(len(plan.words), request.config, rng)
         if request.emit_directions:
-            emit_directions(directions, font_sizes)
+            emit_directions(directions, font_sizes, plan.words)
             return 0
         validate_ffmpeg_capabilities()
         tokens = build_render_tokens(plan, request.config, font_sizes)
