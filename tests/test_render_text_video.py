@@ -11,7 +11,7 @@ from typing import List
 
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
-REVERSE_DIRECTIONS = ("R2L", "B2T")
+ENTRY_LEADING_DIRECTIONS = ("L2R", "T2B")
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
 
 
@@ -118,7 +118,7 @@ def expected_letter_bands_for_direction(
     letter_band_sizes: list[int], direction: str
 ) -> list[int]:
     """Compute expected band offsets for a direction."""
-    if direction in REVERSE_DIRECTIONS:
+    if direction in ENTRY_LEADING_DIRECTIONS:
         reversed_sizes = list(reversed(letter_band_sizes))
         reversed_positions = expected_letter_bands(reversed_sizes)
         return list(reversed(reversed_positions))
@@ -146,7 +146,7 @@ def assert_band_order_for_direction(bands: list[int], direction: str) -> None:
     """Assert band offsets are ordered so the first letter leads."""
     if len(bands) <= 1:
         return
-    if direction in REVERSE_DIRECTIONS:
+    if direction in ENTRY_LEADING_DIRECTIONS:
         assert all(
             current > following for current, following in zip(bands, bands[1:])
         )

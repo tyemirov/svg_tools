@@ -44,7 +44,7 @@ from service.render_plan import RenderPlan, build_render_plan
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
 HORIZONTAL_DIRECTIONS = ("L2R", "R2L")
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
-REVERSE_DIRECTIONS = ("R2L", "B2T")
+ENTRY_LEADING_DIRECTIONS = ("L2R", "T2B")
 LETTER_STAGGER_RATIO = 0.3
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
@@ -613,7 +613,7 @@ def render_video(
                     )
                     current_letter_bands = compute_letter_band_positions(
                         compute_letter_band_sizes(current_token.letters, direction),
-                        direction in REVERSE_DIRECTIONS,
+                        direction in ENTRY_LEADING_DIRECTIONS,
                     )
                 token = current_token
                 if token is None:
@@ -800,7 +800,7 @@ def main() -> int:
             for token, direction in zip(tokens, directions)
         ]
         letter_bands = [
-            compute_letter_band_positions(sizes, direction in REVERSE_DIRECTIONS)
+            compute_letter_band_positions(sizes, direction in ENTRY_LEADING_DIRECTIONS)
             for sizes, direction in zip(letter_band_sizes, directions)
         ]
         if request.emit_directions:

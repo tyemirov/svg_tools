@@ -26,6 +26,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 - [x] [B303] Ensure vertical band letters never share horizontal overlap and move independently. Resolved with band non-overlap test and centered glyph placement.
 - [x] [B304] Align vertical/horizontal band orientation with motion direction so vertical words only move vertically. Resolved with centered motion-axis bands and updated tests/docs.
 - [x] [B305] Ensure the first letter leads movement in every direction (no backwards reveal). Resolved with direction-aware band ordering and stagger offsets.
+- [x] [B306] Ensure first-letter entry order for L2R/T2B directions. Resolved with entry-side band reversal and updated tests/docs.
 
 ## Maintenance (400–499)
 
@@ -83,3 +84,4 @@ proceed
 - [B303] Priority: high. Goal: prevent vertical band letters from overlapping horizontally and ensure per-letter motion is visible. Dependencies: accurate glyph center alignment in band placement. Docs: update `README.md` if emit schema changes. Plan: add integration test for vertical band non-overlap, align glyph centers when computing positions, run `make ci`. Deliverable: vertical bands with non-overlapping letters.
 - [B304] Priority: high. Goal: ensure vertical words only move vertically and horizontal words only move horizontally. Dependencies: band offsets aligned with motion axis and emit output updates. Docs: update `README.md` notes for band semantics. Plan: update band placement math and tests to center band offsets along motion axis, run `make ci`. Deliverable: direction-aligned band motion.
 - [B305] Priority: high. Goal: ensure the first letter appears first regardless of movement direction. Dependencies: band ordering and stagger offsets aligned to direction. Docs: update `README.md` notes for letter-leading behavior. Plan: reverse band order for reverse directions and invert stagger offsets so first letter leads, add tests, run `make ci`. Deliverable: consistent first-letter-leading motion.
+- [B306] Priority: high. Goal: ensure first-letter entry order for L2R/T2B so the leading letter appears first when entering the frame. Dependencies: band ordering tied to entry side. Docs: update `README.md` note. Plan: update band reversal set, adjust tests, run `make ci`. Deliverable: correct entry-side ordering.
