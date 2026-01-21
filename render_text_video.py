@@ -44,7 +44,12 @@ from service.render_plan import RenderPlan, build_render_plan
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
 HORIZONTAL_DIRECTIONS = ("L2R", "R2L")
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
-ENTRY_LEADING_DIRECTIONS = ("L2R", "T2B")
+LETTER_ORDER_BY_DIRECTION = {
+    "L2R": "forward",
+    "R2L": "reverse",
+    "T2B": "forward",
+    "B2T": "reverse",
+}
 LETTER_STAGGER_RATIO = 0.3
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
@@ -395,6 +400,16 @@ def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ..
     return tuple(offsets)
 
 
+def should_reverse_letter_order(direction: str) -> bool:
+    """Return True when letter order should be reversed for the direction."""
+    order = LETTER_ORDER_BY_DIRECTION.get(direction)
+    if order is None:
+        raise RenderPipelineError(
+            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
+        )
+    return order == "reverse"
+
+
 def compute_letter_band_sizes(
     letters: Sequence[LetterToken], direction: str
 ) -> Tuple[int, ...]:
@@ -613,7 +628,7 @@ def render_video(
                     )
                     current_letter_bands = compute_letter_band_positions(
                         compute_letter_band_sizes(current_token.letters, direction),
-                        direction in ENTRY_LEADING_DIRECTIONS,
+                        should_reverse_letter_order(direction),
                     )
                 token = current_token
                 if token is None:
@@ -800,7 +815,7 @@ def main() -> int:
             for token, direction in zip(tokens, directions)
         ]
         letter_bands = [
-            compute_letter_band_positions(sizes, direction in ENTRY_LEADING_DIRECTIONS)
+            compute_letter_band_positions(sizes, should_reverse_letter_order(direction))
             for sizes, direction in zip(letter_band_sizes, directions)
         ]
         if request.emit_directions:
