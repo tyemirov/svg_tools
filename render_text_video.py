@@ -45,8 +45,8 @@ DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
 HORIZONTAL_DIRECTIONS = ("L2R", "R2L")
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
 LETTER_ORDER_BY_DIRECTION = {
-    "L2R": "forward",
-    "R2L": "reverse",
+    "L2R": "reverse",
+    "R2L": "forward",
     "T2B": "reverse",
     "B2T": "forward",
 }

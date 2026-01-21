@@ -32,6 +32,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 - [x] [B307] Ensure entry-side band ordering for all directions matches first-letter entry. Resolved with direction→order map and updated tests/docs.
 - [x] [B308] Add integration test confirming top-to-bottom words lead with the first letter (HARD example). Resolved with deterministic T2B band-order test.
 - [x] [B309] Add integration test confirming HARD leads in all four directions. Resolved with deterministic seed coverage for each direction.
+- [x] [B310] Fix left-to-right ordering so the first letter leads the motion (Cyrillic example "писать"). Resolved with L2R order flip and rendered-frame test.
 
 ## Maintenance (400–499)
 
@@ -95,3 +96,4 @@ proceed
 - [B307] Priority: high. Goal: ensure entry-side band ordering across all directions so the first letter enters first. Dependencies: direction→letter-order map. Docs: update `README.md` note. Plan: add ordering map, update tests, run `make ci`. Deliverable: consistent entry-side ordering.
 - [B308] Priority: medium. Goal: add integration test verifying top-to-bottom words lead with the first letter (HARD). Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for T2B first-letter entry.
 - [B309] Priority: medium. Goal: add integration test verifying HARD leads for L2R/R2L/T2B/B2T. Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for all direction first-letter entry.
+- [B310] Priority: high. Goal: ensure L2R ordering leads with the first letter (example: "писать" should display as reversed order while moving L2R). Dependencies: direction ordering map, rendering test. Docs: update `README.md` note if ordering changes. Plan: adjust ordering map, replace emit-based ordering tests with rendered-frame assertions, run `make ci`. Deliverable: correct L2R order and rendering-based coverage.

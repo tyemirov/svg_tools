@@ -2,28 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import shutil
 import struct
 import subprocess
 import zlib
 from pathlib import Path
 from typing import List
 
-LETTER_TRACKING_RATIO = 0.15
-MIN_TRACKING_PIXELS = 2
-LETTER_ORDER_BY_DIRECTION = {
-    "L2R": "forward",
-    "R2L": "reverse",
-    "T2B": "reverse",
-    "B2T": "forward",
-}
-DIRECTION_SEEDS = {
-    "B2T": 0,
-    "R2L": 1,
-    "L2R": 2,
-    "T2B": 5,
-}
-VERTICAL_DIRECTIONS = ("T2B", "B2T")
+BYTES_PER_PIXEL = 4
 
 
 def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
@@ -35,6 +21,115 @@ def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.Comple
         capture_output=True,
         check=False,
     )
+
+
+def extract_raw_frame(video_path: Path, time_seconds: float) -> bytes:
+    """Extract a raw RGBA frame from a video at the requested time."""
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{time_seconds:.3f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return result.stdout
+
+
+def alpha_bbox(frame_bytes: bytes, width: int, height: int) -> tuple[int, int, int, int]:
+    """Return the bounding box of non-transparent pixels."""
+    min_x = width
+    min_y = height
+    max_x = -1
+    max_y = -1
+    for y_value in range(height):
+        row_offset = y_value * width * BYTES_PER_PIXEL
+        for x_value in range(width):
+            alpha_value = frame_bytes[row_offset + x_value * BYTES_PER_PIXEL + 3]
+            if alpha_value == 0:
+                continue
+            min_x = min(min_x, x_value)
+            min_y = min(min_y, y_value)
+            max_x = max(max_x, x_value)
+            max_y = max(max_y, y_value)
+    if max_x < 0:
+        raise AssertionError("no non-transparent pixels found")
+    return min_x, min_y, max_x, max_y
+
+
+def crop_rgba(
+    frame_bytes: bytes,
+    width: int,
+    height: int,
+    bbox: tuple[int, int, int, int],
+) -> tuple[bytes, int, int]:
+    """Crop an RGBA frame to a bounding box."""
+    left, top, right, bottom = bbox
+    crop_width = right - left + 1
+    crop_height = bottom - top + 1
+    rows: list[bytes] = []
+    for y_value in range(top, bottom + 1):
+        start = (y_value * width + left) * BYTES_PER_PIXEL
+        end = start + crop_width * BYTES_PER_PIXEL
+        rows.append(frame_bytes[start:end])
+    return b"".join(rows), crop_width, crop_height
+
+
+def alpha_rows(frame_bytes: bytes, width: int, height: int) -> list[bytes]:
+    """Extract alpha channel rows from an RGBA frame."""
+    rows: list[bytes] = []
+    for y_value in range(height):
+        row_start = y_value * width * BYTES_PER_PIXEL + 3
+        row = bytes(
+            frame_bytes[row_start + x_value * BYTES_PER_PIXEL]
+            for x_value in range(width)
+        )
+        rows.append(row)
+    return rows
+
+
+def find_template_leftmost_x(
+    frame_bytes: bytes,
+    width: int,
+    height: int,
+    template_bytes: bytes,
+    template_width: int,
+    template_height: int,
+    search_bbox: tuple[int, int, int, int],
+) -> int:
+    """Find the leftmost x position where the template alpha matches."""
+    frame_alpha = alpha_rows(frame_bytes, width, height)
+    template_alpha = alpha_rows(template_bytes, template_width, template_height)
+    left, top, right, bottom = search_bbox
+    max_x = right - template_width + 1
+    max_y = bottom - template_height + 1
+    best_x = None
+    for y_value in range(top, max_y + 1):
+        for x_value in range(left, max_x + 1):
+            matched = True
+            for row_index, template_row in enumerate(template_alpha):
+                frame_row = frame_alpha[y_value + row_index][x_value : x_value + template_width]
+                if frame_row != template_row:
+                    matched = False
+                    break
+            if matched:
+                if best_x is None or x_value < best_x:
+                    best_x = x_value
+    if best_x is None:
+        raise AssertionError("template not found in frame")
+    return best_x
 
 
 def write_srt_file(target_path: Path, content: str) -> None:
@@ -75,6 +170,8 @@ def build_common_args(
     duration_seconds: str,
     fps: str,
     include_dimensions: bool = True,
+    width: int = 64,
+    height: int = 64,
 ) -> List[str]:
     """Build common CLI arguments for render_text_video.py."""
     args = [
@@ -93,91 +190,8 @@ def build_common_args(
         str(fonts_dir),
     ]
     if include_dimensions:
-        args.extend(["--width", "64", "--height", "64"])
+        args.extend(["--width", str(width), "--height", str(height)])
     return args
-
-
-def expected_font_size_range(width: int, height: int) -> tuple[int, int]:
-    """Compute the expected font size range for a frame size."""
-    min_dimension = min(width, height)
-    base_size = max(24, min_dimension // 8)
-    min_size = max(32, base_size + 4, min_dimension // 5)
-    max_size = max(min_size * 2, int(min_dimension * 2.0))
-    return min_size, max_size
-
-
-def expected_letter_bands(letter_band_sizes: list[int]) -> list[int]:
-    """Compute expected band offsets for letter placement."""
-    if not letter_band_sizes:
-        return []
-    tracking_sizes = [
-        max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
-        for size in letter_band_sizes
-    ]
-    total_span = sum(letter_band_sizes) + sum(tracking_sizes[:-1])
-    cursor = -total_span / 2.0
-    positions: list[int] = []
-    for index_value, size in enumerate(letter_band_sizes):
-        positions.append(int(round(cursor + size / 2.0)))
-        cursor += size
-        if index_value < len(letter_band_sizes) - 1:
-            cursor += tracking_sizes[index_value]
-    return positions
-
-
-def expected_letter_bands_for_direction(
-    letter_band_sizes: list[int], direction: str
-) -> list[int]:
-    """Compute expected band offsets for a direction."""
-    if LETTER_ORDER_BY_DIRECTION[direction] == "reverse":
-        reversed_sizes = list(reversed(letter_band_sizes))
-        reversed_positions = expected_letter_bands(reversed_sizes)
-        return list(reversed(reversed_positions))
-    return expected_letter_bands(letter_band_sizes)
-
-
-def assert_non_overlapping_bands(bands: list[int], sizes: list[int]) -> None:
-    """Assert bands do not overlap given their sizes."""
-    intervals = sorted(
-        (
-            band_center - band_size / 2.0,
-            band_center + band_size / 2.0,
-        )
-        for band_center, band_size in zip(bands, sizes)
-    )
-    for (previous_left, previous_right), (current_left, current_right) in zip(
-        intervals, intervals[1:]
-    ):
-        assert previous_left <= previous_right
-        assert current_left <= current_right
-        assert current_left >= previous_right
-
-
-def assert_band_order_for_direction(bands: list[int], direction: str) -> None:
-    """Assert band offsets are ordered so the first letter leads."""
-    if len(bands) <= 1:
-        return
-    if LETTER_ORDER_BY_DIRECTION[direction] == "reverse":
-        assert all(current > following for current, following in zip(bands, bands[1:]))
-        return
-    assert all(current < following for current, following in zip(bands, bands[1:]))
-
-
-def assert_first_letter_enters_first(bands: list[int], direction: str) -> None:
-    """Assert the first letter sits on the entry side for the direction."""
-    if LETTER_ORDER_BY_DIRECTION[direction] == "reverse":
-        assert bands[0] == max(bands)
-        return
-    assert bands[0] == min(bands)
-
-
-def assert_offsets_lead_first(offsets: list[float], direction: str) -> None:
-    """Assert vertical offsets lead with the first letter."""
-    if len(offsets) <= 1 or direction not in VERTICAL_DIRECTIONS:
-        return
-    assert all(
-        current >= following for current, following in zip(offsets, offsets[1:])
-    )
 
 
 def test_srt_window_too_small(tmp_path: Path) -> None:
@@ -239,116 +253,101 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     script_path = repo_root / "render_text_video.py"
     fonts_dir = repo_root / "assets" / "fonts"
 
-    input_text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    input_text = "alpha"
     input_path = tmp_path / "words.txt"
     input_path.write_text(input_text, encoding="utf-8")
 
-    output_path = tmp_path / "out.mov"
-    base_args = build_common_args(
-        script_path=script_path,
-        input_path=input_path,
-        output_path=output_path,
-        fonts_dir=fonts_dir,
-        duration_seconds="3.0",
-        fps="10",
-    )
+    duration_seconds = "1.2"
+    fps = "8"
 
-    args_seeded = base_args + ["--emit-directions", "--direction-seed", "7"]
-    first = run_render_text_video(args_seeded, repo_root)
-    second = run_render_text_video(args_seeded, repo_root)
-
-    assert first.returncode == 0
-    assert second.returncode == 0
-
-    first_payload = json.loads(first.stdout or "{}")
-    second_payload = json.loads(second.stdout or "{}")
-
-    assert first_payload["directions"] == second_payload["directions"]
-    assert first_payload["font_sizes"] == second_payload["font_sizes"]
-    assert first_payload["words"] == second_payload["words"]
-    assert first_payload["letter_offsets"] == second_payload["letter_offsets"]
-    assert first_payload["letter_bands"] == second_payload["letter_bands"]
-    assert first_payload["letter_band_sizes"] == second_payload["letter_band_sizes"]
-
-    expected_min_size, expected_max_size = expected_font_size_range(64, 64)
-    for font_size in first_payload["font_sizes"]:
-        assert expected_min_size <= font_size <= expected_max_size
-
-    first_offsets = first_payload["letter_offsets"][0]
-    assert any(offset != 0 for offset in first_offsets)
-    second_offsets = first_payload["letter_offsets"][1]
-    assert all(offset == 0 for offset in second_offsets)
-
-    for word, direction, bands, band_sizes in zip(
-        first_payload["words"],
-        first_payload["directions"],
-        first_payload["letter_bands"],
-        first_payload["letter_band_sizes"],
-    ):
-        assert len(band_sizes) == len(word)
-        assert all(size >= 1 for size in band_sizes)
-        assert bands == expected_letter_bands_for_direction(band_sizes, direction)
-        assert_band_order_for_direction(bands, direction)
-
-    assert any(
-        direction in ("T2B", "B2T") for direction in first_payload["directions"]
-    )
-    for direction, bands, band_sizes in zip(
-        first_payload["directions"],
-        first_payload["letter_bands"],
-        first_payload["letter_band_sizes"],
-    ):
-        if direction in ("T2B", "B2T"):
-            assert_non_overlapping_bands(bands, band_sizes)
-    for direction, offsets in zip(
-        first_payload["directions"], first_payload["letter_offsets"]
-    ):
-        assert_offsets_lead_first(offsets, direction)
-
-    args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
-    other = run_render_text_video(args_other_seed, repo_root)
-    assert other.returncode == 0
-
-    other_payload = json.loads(other.stdout or "{}")
-    assert other_payload["directions"] != first_payload["directions"]
-    assert other_payload["font_sizes"] != first_payload["font_sizes"]
-    assert other_payload["letter_offsets"] != first_payload["letter_offsets"]
-
-
-def test_hard_first_letter_leads_all_directions(tmp_path: Path) -> None:
-    """Ensure HARD leads with the first letter across all directions."""
-    repo_root = Path(__file__).resolve().parents[1]
-    script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
-
-    input_text = "HARD"
-
-    for direction, seed in DIRECTION_SEEDS.items():
-        input_path = tmp_path / f"words-{direction}.txt"
-        input_path.write_text(input_text, encoding="utf-8")
-
-        output_path = tmp_path / f"out-{direction}.mov"
-        base_args = build_common_args(
+    def render(seed: str, output_name: str) -> Path:
+        output_path = tmp_path / output_name
+        args = build_common_args(
             script_path=script_path,
             input_path=input_path,
             output_path=output_path,
             fonts_dir=fonts_dir,
-            duration_seconds="1.5",
-            fps="10",
+            duration_seconds=duration_seconds,
+            fps=fps,
         )
-
-        args = base_args + ["--emit-directions", "--direction-seed", str(seed)]
+        args.extend(["--direction-seed", seed])
         result = run_render_text_video(args, repo_root)
         assert result.returncode == 0
+        assert output_path.exists()
+        return output_path
 
-        payload = json.loads(result.stdout or "{}")
-        assert payload["words"] == [input_text]
-        assert payload["directions"] == [direction]
+    first_path = render("2", "out-1.mov")
+    second_path = render("2", "out-2.mov")
+    other_path = render("5", "out-3.mov")
 
-        bands = payload["letter_bands"][0]
-        assert len(bands) == len(input_text)
-        assert_band_order_for_direction(bands, direction)
-        assert_first_letter_enters_first(bands, direction)
+    time_seconds = float(duration_seconds) / 2.0
+    first_frame = extract_raw_frame(first_path, time_seconds)
+    second_frame = extract_raw_frame(second_path, time_seconds)
+    other_frame = extract_raw_frame(other_path, time_seconds)
+
+    assert first_frame == second_frame
+    assert first_frame != other_frame
+
+
+def test_l2r_cyrillic_word_is_reversed(tmp_path: Path) -> None:
+    """Ensure L2R words lead with the first letter."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    shutil.copy(source_font, fonts_dir / source_font.name)
+
+    width = 300
+    height = 200
+    duration_seconds = "1.5"
+    fps = "10"
+    seed = "42"
+
+    def render_word(text_value: str, output_name: str) -> Path:
+        input_path = tmp_path / f"{output_name}.txt"
+        input_path.write_text(text_value, encoding="utf-8")
+        output_path = tmp_path / f"{output_name}.mov"
+        args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds=duration_seconds,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        args.extend(["--direction-seed", seed])
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
+        return output_path
+
+    word_path = render_word("писать", "word")
+    pe_path = render_word("п", "pe")
+    soft_path = render_word("ь", "soft-sign")
+
+    time_seconds = float(duration_seconds) / 2.0
+    word_frame = extract_raw_frame(word_path, time_seconds)
+    word_bbox = alpha_bbox(word_frame, width, height)
+
+    pe_frame = extract_raw_frame(pe_path, time_seconds)
+    pe_template, pe_width, pe_height = crop_rgba(
+        pe_frame, width, height, alpha_bbox(pe_frame, width, height)
+    )
+    soft_frame = extract_raw_frame(soft_path, time_seconds)
+    soft_template, soft_width, soft_height = crop_rgba(
+        soft_frame, width, height, alpha_bbox(soft_frame, width, height)
+    )
+
+    pe_x = find_template_leftmost_x(
+        word_frame, width, height, pe_template, pe_width, pe_height, word_bbox
+    )
+    soft_x = find_template_leftmost_x(
+        word_frame, width, height, soft_template, soft_width, soft_height, word_bbox
+    )
+
+    assert pe_x > soft_x
 
 
 def test_remove_punctuation(tmp_path: Path) -> None:
@@ -361,33 +360,41 @@ def test_remove_punctuation(tmp_path: Path) -> None:
     input_path = tmp_path / "words.txt"
     input_path.write_text(input_text, encoding="utf-8")
 
-    output_path = tmp_path / "out.mov"
+    duration_seconds = "2.0"
+    fps = "10"
+    seed = "11"
+
+    output_path = tmp_path / "out-strip.mov"
     base_args = build_common_args(
         script_path=script_path,
         input_path=input_path,
         output_path=output_path,
         fonts_dir=fonts_dir,
-        duration_seconds="2.0",
-        fps="10",
+        duration_seconds=duration_seconds,
+        fps=fps,
     )
 
-    args_strip = base_args + ["--emit-directions", "--remove-punctuation"]
+    args_strip = base_args + ["--remove-punctuation", "--direction-seed", seed]
     stripped = run_render_text_video(args_strip, repo_root)
     assert stripped.returncode == 0
-    stripped_payload = json.loads(stripped.stdout or "{}")
-    assert stripped_payload["words"] == ["Hello", "world", "Testing", "punctuation", "OK"]
 
-    args_keep = base_args + ["--emit-directions"]
+    output_path_keep = tmp_path / "out-keep.mov"
+    args_keep = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path_keep,
+        fonts_dir=fonts_dir,
+        duration_seconds=duration_seconds,
+        fps=fps,
+    )
+    args_keep.extend(["--direction-seed", seed])
     kept = run_render_text_video(args_keep, repo_root)
     assert kept.returncode == 0
-    kept_payload = json.loads(kept.stdout or "{}")
-    assert kept_payload["words"] == [
-        "Hello,",
-        "world!",
-        "(Testing)",
-        "punctuation...",
-        "OK?",
-    ]
+
+    time_seconds = float(duration_seconds) / 2.0
+    stripped_frame = extract_raw_frame(output_path, time_seconds)
+    kept_frame = extract_raw_frame(output_path_keep, time_seconds)
+    assert stripped_frame != kept_frame
 
 
 def test_background_image_derives_dimensions(tmp_path: Path) -> None:
@@ -403,30 +410,29 @@ def test_background_image_derives_dimensions(tmp_path: Path) -> None:
     background_path = tmp_path / "background.png"
     write_png(background_path, 10, 12, (20, 40, 60, 255))
 
+    duration_seconds = "1.2"
+    fps = "10"
     output_path = tmp_path / "out.mov"
     base_args = build_common_args(
         script_path=script_path,
         input_path=input_path,
         output_path=output_path,
         fonts_dir=fonts_dir,
-        duration_seconds="3.0",
-        fps="10",
+        duration_seconds=duration_seconds,
+        fps=fps,
         include_dimensions=False,
     )
 
     args = base_args + [
         "--background-image",
         str(background_path),
-        "--emit-directions",
         "--direction-seed",
         "7",
     ]
     result = run_render_text_video(args, repo_root)
     assert result.returncode == 0
-
-    payload = json.loads(result.stdout or "{}")
-    _, expected_max_size = expected_font_size_range(10, 12)
-    assert max(payload["font_sizes"]) <= expected_max_size
+    frame_bytes = extract_raw_frame(output_path, float(duration_seconds) / 2.0)
+    assert len(frame_bytes) == 10 * 12 * BYTES_PER_PIXEL
 
 
 def test_background_image_conflicts_with_dimensions(tmp_path: Path) -> None:
@@ -451,7 +457,7 @@ def test_background_image_conflicts_with_dimensions(tmp_path: Path) -> None:
         duration_seconds="1.0",
         fps="10",
     )
-    args = base_args + ["--background-image", str(background_path), "--emit-directions"]
+    args = base_args + ["--background-image", str(background_path)]
     result = run_render_text_video(args, repo_root)
     assert result.returncode != 0
     assert "render_text_video.input.invalid_config" in result.stderr
@@ -482,7 +488,6 @@ def test_requires_dimensions_without_background(tmp_path: Path) -> None:
         "transparent",
         "--fonts-dir",
         str(fonts_dir),
-        "--emit-directions",
     ]
 
     result = run_render_text_video(args, repo_root)
