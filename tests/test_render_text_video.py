@@ -11,6 +11,8 @@ from typing import List
 
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
+REVERSE_DIRECTIONS = ("R2L", "B2T")
+VERTICAL_DIRECTIONS = ("T2B", "B2T")
 
 
 def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
@@ -112,6 +114,17 @@ def expected_letter_bands(letter_band_sizes: list[int]) -> list[int]:
     return positions
 
 
+def expected_letter_bands_for_direction(
+    letter_band_sizes: list[int], direction: str
+) -> list[int]:
+    """Compute expected band offsets for a direction."""
+    if direction in REVERSE_DIRECTIONS:
+        reversed_sizes = list(reversed(letter_band_sizes))
+        reversed_positions = expected_letter_bands(reversed_sizes)
+        return list(reversed(reversed_positions))
+    return expected_letter_bands(letter_band_sizes)
+
+
 def assert_non_overlapping_bands(bands: list[int], sizes: list[int]) -> None:
     """Assert bands do not overlap given their sizes."""
     intervals = sorted(
@@ -127,6 +140,29 @@ def assert_non_overlapping_bands(bands: list[int], sizes: list[int]) -> None:
         assert previous_left <= previous_right
         assert current_left <= current_right
         assert current_left >= previous_right
+
+
+def assert_band_order_for_direction(bands: list[int], direction: str) -> None:
+    """Assert band offsets are ordered so the first letter leads."""
+    if len(bands) <= 1:
+        return
+    if direction in REVERSE_DIRECTIONS:
+        assert all(
+            current > following for current, following in zip(bands, bands[1:])
+        )
+    else:
+        assert all(
+            current < following for current, following in zip(bands, bands[1:])
+        )
+
+
+def assert_offsets_lead_first(offsets: list[float], direction: str) -> None:
+    """Assert vertical offsets lead with the first letter."""
+    if len(offsets) <= 1 or direction not in VERTICAL_DIRECTIONS:
+        return
+    assert all(
+        current >= following for current, following in zip(offsets, offsets[1:])
+    )
 
 
 def test_srt_window_too_small(tmp_path: Path) -> None:
@@ -236,7 +272,8 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     ):
         assert len(band_sizes) == len(word)
         assert all(size >= 1 for size in band_sizes)
-        assert bands == expected_letter_bands(band_sizes)
+        assert bands == expected_letter_bands_for_direction(band_sizes, direction)
+        assert_band_order_for_direction(bands, direction)
 
     assert any(
         direction in ("T2B", "B2T") for direction in first_payload["directions"]
@@ -248,6 +285,10 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     ):
         if direction in ("T2B", "B2T"):
             assert_non_overlapping_bands(bands, band_sizes)
+    for direction, offsets in zip(
+        first_payload["directions"], first_payload["letter_offsets"]
+    ):
+        assert_offsets_lead_first(offsets, direction)
 
     args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
     other = run_render_text_video(args_other_seed, repo_root)

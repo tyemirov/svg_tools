@@ -44,6 +44,7 @@ from service.render_plan import RenderPlan, build_render_plan
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
 HORIZONTAL_DIRECTIONS = ("L2R", "R2L")
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
+REVERSE_DIRECTIONS = ("R2L", "B2T")
 LETTER_STAGGER_RATIO = 0.3
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
@@ -390,7 +391,7 @@ def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ..
     offsets: list[float] = []
     for index_value in range(letter_count):
         normalized = index_value / float(max(1, letter_count - 1))
-        offsets.append((normalized - 0.5) * LETTER_STAGGER_RATIO)
+        offsets.append((0.5 - normalized) * LETTER_STAGGER_RATIO)
     return tuple(offsets)
 
 
@@ -416,22 +417,26 @@ def compute_letter_band_sizes(
 
 def compute_letter_band_positions(
     letter_band_sizes: Sequence[int],
+    reverse_order: bool,
 ) -> Tuple[int, ...]:
     """Compute centered band offsets for letters."""
     if not letter_band_sizes:
         return ()
+    sizes = list(reversed(letter_band_sizes)) if reverse_order else list(letter_band_sizes)
     tracking_sizes = [
         max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
-        for size in letter_band_sizes
+        for size in sizes
     ]
-    total_span = sum(letter_band_sizes) + sum(tracking_sizes[:-1])
+    total_span = sum(sizes) + sum(tracking_sizes[:-1])
     cursor = -total_span / 2.0
     positions: list[int] = []
-    for index_value, size in enumerate(letter_band_sizes):
+    for index_value, size in enumerate(sizes):
         positions.append(int(round(cursor + size / 2.0)))
         cursor += size
-        if index_value < len(letter_band_sizes) - 1:
+        if index_value < len(sizes) - 1:
             cursor += tracking_sizes[index_value]
+    if reverse_order:
+        positions.reverse()
     return tuple(positions)
 
 
@@ -607,7 +612,8 @@ def render_video(
                         len(current_token.letters), direction
                     )
                     current_letter_bands = compute_letter_band_positions(
-                        compute_letter_band_sizes(current_token.letters, direction)
+                        compute_letter_band_sizes(current_token.letters, direction),
+                        direction in REVERSE_DIRECTIONS,
                     )
                 token = current_token
                 if token is None:
@@ -794,7 +800,8 @@ def main() -> int:
             for token, direction in zip(tokens, directions)
         ]
         letter_bands = [
-            compute_letter_band_positions(sizes) for sizes in letter_band_sizes
+            compute_letter_band_positions(sizes, direction in REVERSE_DIRECTIONS)
+            for sizes, direction in zip(letter_band_sizes, directions)
         ]
         if request.emit_directions:
             emit_directions(

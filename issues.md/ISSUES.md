@@ -25,6 +25,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 - [x] [B302] Prevent letter band overlap by spacing bands using per-letter glyph sizes for both vertical and horizontal directions. Resolved with glyph-based band sizes, tracking spacing, and emit/test updates.
 - [x] [B303] Ensure vertical band letters never share horizontal overlap and move independently. Resolved with band non-overlap test and centered glyph placement.
 - [x] [B304] Align vertical/horizontal band orientation with motion direction so vertical words only move vertically. Resolved with centered motion-axis bands and updated tests/docs.
+- [x] [B305] Ensure the first letter leads movement in every direction (no backwards reveal). Resolved with direction-aware band ordering and stagger offsets.
 
 ## Maintenance (400–499)
 
@@ -81,3 +82,4 @@ proceed
 - [B302] Priority: high. Goal: ensure banded letter positions remain legible by spacing bands with per-letter glyph sizes and tracking. Dependencies: glyph metrics from fonts, emit payload updates for tests. Docs: update `README.md` notes/emit schema. Plan: compute band sizes per letter, derive band positions from sizes, update emit JSON and integration tests, run `make ci`. Deliverable: non-overlapping letter bands across directions.
 - [B303] Priority: high. Goal: prevent vertical band letters from overlapping horizontally and ensure per-letter motion is visible. Dependencies: accurate glyph center alignment in band placement. Docs: update `README.md` if emit schema changes. Plan: add integration test for vertical band non-overlap, align glyph centers when computing positions, run `make ci`. Deliverable: vertical bands with non-overlapping letters.
 - [B304] Priority: high. Goal: ensure vertical words only move vertically and horizontal words only move horizontally. Dependencies: band offsets aligned with motion axis and emit output updates. Docs: update `README.md` notes for band semantics. Plan: update band placement math and tests to center band offsets along motion axis, run `make ci`. Deliverable: direction-aligned band motion.
+- [B305] Priority: high. Goal: ensure the first letter appears first regardless of movement direction. Dependencies: band ordering and stagger offsets aligned to direction. Docs: update `README.md` notes for letter-leading behavior. Plan: reverse band order for reverse directions and invert stagger offsets so first letter leads, add tests, run `make ci`. Deliverable: consistent first-letter-leading motion.
