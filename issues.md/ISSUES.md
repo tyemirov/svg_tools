@@ -33,6 +33,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 - [x] [B308] Add integration test confirming top-to-bottom words lead with the first letter (HARD example). Resolved with deterministic T2B band-order test.
 - [x] [B309] Add integration test confirming HARD leads in all four directions. Resolved with deterministic seed coverage for each direction.
 - [x] [B310] Fix left-to-right ordering so the first letter leads the motion (Cyrillic example "писать"). Resolved with L2R order flip and rendered-frame test.
+- [x] [B311] Reduce alpha output size (20GB/100s) while keeping fast rendering and alpha. Resolved with ProRes 4444 tuned quality and lossy-safe render tests.
 
 ## Maintenance (400–499)
 
@@ -97,3 +98,4 @@ proceed
 - [B308] Priority: medium. Goal: add integration test verifying top-to-bottom words lead with the first letter (HARD). Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for T2B first-letter entry.
 - [B309] Priority: medium. Goal: add integration test verifying HARD leads for L2R/R2L/T2B/B2T. Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for all direction first-letter entry.
 - [B310] Priority: high. Goal: ensure L2R ordering leads with the first letter (example: "писать" should display as reversed order while moving L2R). Dependencies: direction ordering map, rendering test. Docs: update `README.md` note if ordering changes. Plan: adjust ordering map, replace emit-based ordering tests with rendered-frame assertions, run `make ci`. Deliverable: correct L2R order and rendering-based coverage.
+- [B311] Priority: high. Goal: reduce alpha output file size while keeping alpha and acceptable speed. Dependencies: ffmpeg encoder/pix_fmt support. Docs: update README/ARCHITECTURE. Plan: tune alpha codec/compression defaults, adjust render-based tests for lossy output if needed, run `make ci`. Deliverable: smaller alpha output by default.

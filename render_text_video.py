@@ -60,6 +60,9 @@ FFMPEG_EXEC_CODE = "render_text_video.ffmpeg.exec_error"
 FFMPEG_UNSUPPORTED_CODE = "render_text_video.ffmpeg.unsupported"
 FFMPEG_PROCESS_CODE = "render_text_video.ffmpeg.process_failed"
 INTERNAL_DIRECTION_CODE = "render_text_video.internal.invalid_direction"
+PRORES_PROFILE = "4444"
+PRORES_PIXEL_FORMAT = "yuva444p10le"
+PRORES_QSCALE = "15"
 
 
 class RenderPipelineError(RuntimeError):
@@ -502,9 +505,13 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
         "-",
         "-an",
         "-c:v",
-        "qtrle",
+        "prores_ks",
+        "-profile:v",
+        PRORES_PROFILE,
+        "-qscale:v",
+        PRORES_QSCALE,
         "-pix_fmt",
-        "argb",
+        PRORES_PIXEL_FORMAT,
         "-movflags",
         "+faststart",
         config.output_video_file,
@@ -788,10 +795,10 @@ def validate_ffmpeg_capabilities() -> None:
         text=True,
         check=True,
     )
-    if "qtrle" not in encoders_result.stdout:
+    if "prores_ks" not in encoders_result.stdout:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
-            "ffmpeg does not support qtrle encoder",
+            "ffmpeg does not support prores_ks encoder",
         )
 
     pixfmts_result = subprocess.run(
@@ -801,10 +808,10 @@ def validate_ffmpeg_capabilities() -> None:
         text=True,
         check=True,
     )
-    if "argb" not in pixfmts_result.stdout:
+    if PRORES_PIXEL_FORMAT not in pixfmts_result.stdout:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
-            "ffmpeg does not support argb pixel format",
+            f"ffmpeg does not support {PRORES_PIXEL_FORMAT} pixel format",
         )
 
 

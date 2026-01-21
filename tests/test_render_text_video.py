@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List
 
 BYTES_PER_PIXEL = 4
+ALPHA_THRESHOLD = 10
+TEMPLATE_MATCH_RATIO = 0.98
 
 
 def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
@@ -87,13 +89,15 @@ def crop_rgba(
     return b"".join(rows), crop_width, crop_height
 
 
-def alpha_rows(frame_bytes: bytes, width: int, height: int) -> list[bytes]:
-    """Extract alpha channel rows from an RGBA frame."""
+def alpha_mask_rows(frame_bytes: bytes, width: int, height: int) -> list[bytes]:
+    """Extract alpha mask rows from an RGBA frame."""
     rows: list[bytes] = []
     for y_value in range(height):
         row_start = y_value * width * BYTES_PER_PIXEL + 3
         row = bytes(
-            frame_bytes[row_start + x_value * BYTES_PER_PIXEL]
+            1
+            if frame_bytes[row_start + x_value * BYTES_PER_PIXEL] >= ALPHA_THRESHOLD
+            else 0
             for x_value in range(width)
         )
         rows.append(row)
@@ -110,21 +114,24 @@ def find_template_leftmost_x(
     search_bbox: tuple[int, int, int, int],
 ) -> int:
     """Find the leftmost x position where the template alpha matches."""
-    frame_alpha = alpha_rows(frame_bytes, width, height)
-    template_alpha = alpha_rows(template_bytes, template_width, template_height)
+    frame_alpha = alpha_mask_rows(frame_bytes, width, height)
+    template_alpha = alpha_mask_rows(template_bytes, template_width, template_height)
+    template_on_pixels = sum(sum(row) for row in template_alpha)
+    if template_on_pixels == 0:
+        raise AssertionError("template has no visible pixels")
     left, top, right, bottom = search_bbox
     max_x = right - template_width + 1
     max_y = bottom - template_height + 1
     best_x = None
     for y_value in range(top, max_y + 1):
         for x_value in range(left, max_x + 1):
-            matched = True
+            matched_on = 0
             for row_index, template_row in enumerate(template_alpha):
-                frame_row = frame_alpha[y_value + row_index][x_value : x_value + template_width]
-                if frame_row != template_row:
-                    matched = False
-                    break
-            if matched:
+                frame_row = frame_alpha[y_value + row_index]
+                for col_index, template_pixel in enumerate(template_row):
+                    if template_pixel and frame_row[x_value + col_index]:
+                        matched_on += 1
+            if matched_on / template_on_pixels >= TEMPLATE_MATCH_RATIO:
                 if best_x is None or x_value < best_x:
                     best_x = x_value
     if best_x is None:
