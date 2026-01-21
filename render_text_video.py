@@ -5,7 +5,7 @@
 #   "pillow>=10"
 # ]
 # ///
-"""Render animated word-by-word text into a ProRes MOV."""
+"""Render animated word-by-word text into a MOV with alpha."""
 
 from __future__ import annotations
 
@@ -502,11 +502,9 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
         "-",
         "-an",
         "-c:v",
-        "prores_ks",
-        "-profile:v",
-        "4444",
+        "qtrle",
         "-pix_fmt",
-        "yuva444p10le",
+        "argb",
         "-movflags",
         "+faststart",
         config.output_video_file,
@@ -764,7 +762,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
 
 
 def validate_ffmpeg_capabilities() -> None:
-    """Validate ffmpeg encoders and pixel formats required for ProRes."""
+    """Validate ffmpeg encoders and pixel formats required for alpha output."""
     try:
         version_result = subprocess.run(
             ["ffmpeg", "-version"],
@@ -790,10 +788,10 @@ def validate_ffmpeg_capabilities() -> None:
         text=True,
         check=True,
     )
-    if "prores_ks" not in encoders_result.stdout:
+    if "qtrle" not in encoders_result.stdout:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
-            "ffmpeg does not support prores_ks encoder",
+            "ffmpeg does not support qtrle encoder",
         )
 
     pixfmts_result = subprocess.run(
@@ -803,10 +801,10 @@ def validate_ffmpeg_capabilities() -> None:
         text=True,
         check=True,
     )
-    if "yuva444p10le" not in pixfmts_result.stdout:
+    if "argb" not in pixfmts_result.stdout:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
-            "ffmpeg does not support yuva444p10le pixel format",
+            "ffmpeg does not support argb pixel format",
         )
 
 

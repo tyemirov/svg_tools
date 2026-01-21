@@ -194,9 +194,9 @@ HEIF/HEIC is supported via `pillow-heif`.
 
 ### `render_text_video.py`
 
-Render animated word-by-word text into a transparent ProRes 4444 MOV.
+Render animated word-by-word text into a transparent MOV using QuickTime Animation (qtrle).
 
-Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
+Requires `ffmpeg` with `qtrle` and `argb` support.
 
 **Usage:**
 
