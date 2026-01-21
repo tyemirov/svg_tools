@@ -17,6 +17,12 @@ LETTER_ORDER_BY_DIRECTION = {
     "T2B": "reverse",
     "B2T": "forward",
 }
+DIRECTION_SEEDS = {
+    "B2T": 0,
+    "R2L": 1,
+    "L2R": 2,
+    "T2B": 5,
+}
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
 
 
@@ -155,6 +161,14 @@ def assert_band_order_for_direction(bands: list[int], direction: str) -> None:
         assert all(current > following for current, following in zip(bands, bands[1:]))
         return
     assert all(current < following for current, following in zip(bands, bands[1:]))
+
+
+def assert_first_letter_enters_first(bands: list[int], direction: str) -> None:
+    """Assert the first letter sits on the entry side for the direction."""
+    if LETTER_ORDER_BY_DIRECTION[direction] == "reverse":
+        assert bands[0] == max(bands)
+        return
+    assert bands[0] == min(bands)
 
 
 def assert_offsets_lead_first(offsets: list[float], direction: str) -> None:
@@ -301,38 +315,40 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     assert other_payload["letter_offsets"] != first_payload["letter_offsets"]
 
 
-def test_top_to_bottom_first_letter_leads(tmp_path: Path) -> None:
-    """Ensure top-to-bottom words lead with the first letter."""
+def test_hard_first_letter_leads_all_directions(tmp_path: Path) -> None:
+    """Ensure HARD leads with the first letter across all directions."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
     fonts_dir = repo_root / "assets" / "fonts"
 
     input_text = "HARD"
-    input_path = tmp_path / "words.txt"
-    input_path.write_text(input_text, encoding="utf-8")
 
-    output_path = tmp_path / "out.mov"
-    base_args = build_common_args(
-        script_path=script_path,
-        input_path=input_path,
-        output_path=output_path,
-        fonts_dir=fonts_dir,
-        duration_seconds="1.5",
-        fps="10",
-    )
+    for direction, seed in DIRECTION_SEEDS.items():
+        input_path = tmp_path / f"words-{direction}.txt"
+        input_path.write_text(input_text, encoding="utf-8")
 
-    args = base_args + ["--emit-directions", "--direction-seed", "5"]
-    result = run_render_text_video(args, repo_root)
-    assert result.returncode == 0
+        output_path = tmp_path / f"out-{direction}.mov"
+        base_args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds="1.5",
+            fps="10",
+        )
 
-    payload = json.loads(result.stdout or "{}")
-    assert payload["words"] == ["HARD"]
-    assert payload["directions"] == ["T2B"]
+        args = base_args + ["--emit-directions", "--direction-seed", str(seed)]
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
 
-    bands = payload["letter_bands"][0]
-    assert len(bands) == len(input_text)
-    assert bands[0] == max(bands)
-    assert_band_order_for_direction(bands, "T2B")
+        payload = json.loads(result.stdout or "{}")
+        assert payload["words"] == [input_text]
+        assert payload["directions"] == [direction]
+
+        bands = payload["letter_bands"][0]
+        assert len(bands) == len(input_text)
+        assert_band_order_for_direction(bands, direction)
+        assert_first_letter_enters_first(bands, direction)
 
 
 def test_remove_punctuation(tmp_path: Path) -> None:
