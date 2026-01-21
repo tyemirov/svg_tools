@@ -93,6 +93,7 @@ class LetterToken:
 
     text: str
     bbox: Tuple[int, int, int, int]
+    image: Image.Image
 
 
 @dataclass(frozen=True)
@@ -285,9 +286,26 @@ def load_font_cached(
     return font
 
 
+def render_letter_image(
+    character: str,
+    font: ImageFont.FreeTypeFont,
+    color_rgba: Tuple[int, int, int, int],
+    letter_bbox: Tuple[int, int, int, int],
+) -> Image.Image:
+    """Render a single letter into an RGBA image aligned to its bounding box."""
+    left, top, right, bottom = letter_bbox
+    letter_width = max(1, right - left)
+    letter_height = max(1, bottom - top)
+    letter_image = Image.new("RGBA", (letter_width, letter_height), (0, 0, 0, 0))
+    letter_draw = ImageDraw.Draw(letter_image)
+    letter_draw.text((-left, -top), character, font=font, fill=color_rgba)
+    return letter_image
+
+
 def build_letter_layout(
     word_text: str,
     font: ImageFont.FreeTypeFont,
+    color_rgba: Tuple[int, int, int, int],
     draw_context: ImageDraw.ImageDraw,
 ) -> Tuple[LetterToken, ...]:
     """Build per-letter layout information for a word."""
@@ -296,7 +314,12 @@ def build_letter_layout(
         letter_bbox = draw_context.textbbox(
             (0, 0), character, font=font, stroke_width=0
         )
-        letters.append(LetterToken(text=character, bbox=letter_bbox))
+        letter_image = render_letter_image(
+            character, font, color_rgba, letter_bbox
+        )
+        letters.append(
+            LetterToken(text=character, bbox=letter_bbox, image=letter_image)
+        )
     return tuple(letters)
 
 
@@ -315,7 +338,7 @@ def build_tokens(
         font_size = font_sizes[index_value]
         font_value = load_font_cached(font_file_path, font_size, font_cache)
         color_value = palette[index_value % len(palette)]
-        letters = build_letter_layout(word_text, font_value, layout_draw)
+        letters = build_letter_layout(word_text, font_value, color_value, layout_draw)
         tokens.append(
             WordToken(
                 text=word_text,
@@ -615,7 +638,6 @@ def render_video(
                 )
             else:
                 frame_image = background_image.copy()
-            draw_context = ImageDraw.Draw(frame_image)
 
             if current_schedule is not None:
                 token_index = current_schedule.token_index
@@ -653,12 +675,7 @@ def render_video(
                         letter_bbox=letter.bbox,
                         band_position=current_letter_bands[letter_index],
                     )
-                    draw_context.text(
-                        (pos_x, pos_y),
-                        letter.text,
-                        font=token.style.font,
-                        fill=token.style.color_rgba,
-                    )
+                    frame_image.paste(letter.image, (pos_x, pos_y), letter.image)
 
             ffmpeg_process.stdin.write(frame_image.tobytes())
 
