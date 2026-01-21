@@ -339,33 +339,45 @@ def compute_letter_position(
     if direction == "L2R":
         start_center_x = -letter_width / 2.0
         end_center_x = frame_width + letter_width / 2.0
-        center_x = start_center_x + (end_center_x - start_center_x) * clamped_progress
+        center_x = (
+            start_center_x + (end_center_x - start_center_x) * clamped_progress
+        ) + band_position
+        center_y = frame_height / 2.0
         x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(band_position - center_offset_y))
+        y_value = int(round(center_y - center_offset_y))
         return (x_value, y_value)
 
     if direction == "R2L":
         start_center_x = frame_width + letter_width / 2.0
         end_center_x = -letter_width / 2.0
-        center_x = start_center_x + (end_center_x - start_center_x) * clamped_progress
+        center_x = (
+            start_center_x + (end_center_x - start_center_x) * clamped_progress
+        ) + band_position
+        center_y = frame_height / 2.0
         x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(band_position - center_offset_y))
+        y_value = int(round(center_y - center_offset_y))
         return (x_value, y_value)
 
     if direction == "T2B":
         start_center_y = -letter_height / 2.0
         end_center_y = frame_height + letter_height / 2.0
-        center_y = start_center_y + (end_center_y - start_center_y) * clamped_progress
+        center_y = (
+            start_center_y + (end_center_y - start_center_y) * clamped_progress
+        ) + band_position
+        center_x = frame_width / 2.0
         y_value = int(round(center_y - center_offset_y))
-        x_value = int(round(band_position - center_offset_x))
+        x_value = int(round(center_x - center_offset_x))
         return (x_value, y_value)
 
     if direction == "B2T":
         start_center_y = frame_height + letter_height / 2.0
         end_center_y = -letter_height / 2.0
-        center_y = start_center_y + (end_center_y - start_center_y) * clamped_progress
+        center_y = (
+            start_center_y + (end_center_y - start_center_y) * clamped_progress
+        ) + band_position
+        center_x = frame_width / 2.0
         y_value = int(round(center_y - center_offset_y))
-        x_value = int(round(band_position - center_offset_x))
+        x_value = int(round(center_x - center_offset_x))
         return (x_value, y_value)
 
     raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
@@ -391,9 +403,9 @@ def compute_letter_band_sizes(
         width = letter.bbox[2] - letter.bbox[0]
         height = letter.bbox[3] - letter.bbox[1]
         if direction in VERTICAL_DIRECTIONS:
-            size = width
-        elif direction in HORIZONTAL_DIRECTIONS:
             size = height
+        elif direction in HORIZONTAL_DIRECTIONS:
+            size = width
         else:
             raise RenderPipelineError(
                 INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
@@ -404,27 +416,16 @@ def compute_letter_band_sizes(
 
 def compute_letter_band_positions(
     letter_band_sizes: Sequence[int],
-    frame_width: int,
-    frame_height: int,
-    direction: str,
 ) -> Tuple[int, ...]:
-    """Compute band positions for letters based on motion direction."""
+    """Compute centered band offsets for letters."""
     if not letter_band_sizes:
         return ()
-    if direction in VERTICAL_DIRECTIONS:
-        band_span = frame_width
-    elif direction in HORIZONTAL_DIRECTIONS:
-        band_span = frame_height
-    else:
-        raise RenderPipelineError(
-            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
-        )
     tracking_sizes = [
         max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
         for size in letter_band_sizes
     ]
     total_span = sum(letter_band_sizes) + sum(tracking_sizes[:-1])
-    cursor = (band_span - total_span) / 2.0
+    cursor = -total_span / 2.0
     positions: list[int] = []
     for index_value, size in enumerate(letter_band_sizes):
         positions.append(int(round(cursor + size / 2.0)))
@@ -606,10 +607,7 @@ def render_video(
                         len(current_token.letters), direction
                     )
                     current_letter_bands = compute_letter_band_positions(
-                        compute_letter_band_sizes(current_token.letters, direction),
-                        config.width,
-                        config.height,
-                        direction,
+                        compute_letter_band_sizes(current_token.letters, direction)
                     )
                 token = current_token
                 if token is None:
@@ -796,10 +794,7 @@ def main() -> int:
             for token, direction in zip(tokens, directions)
         ]
         letter_bands = [
-            compute_letter_band_positions(
-                sizes, request.config.width, request.config.height, direction
-            )
-            for sizes, direction in zip(letter_band_sizes, directions)
+            compute_letter_band_positions(sizes) for sizes in letter_band_sizes
         ]
         if request.emit_directions:
             emit_directions(

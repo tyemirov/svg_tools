@@ -93,24 +93,16 @@ def expected_font_size_range(width: int, height: int) -> tuple[int, int]:
     return min_size, max_size
 
 
-def expected_letter_bands(
-    letter_band_sizes: list[int], width: int, height: int, direction: str
-) -> list[int]:
-    """Compute expected band positions for letter placement."""
+def expected_letter_bands(letter_band_sizes: list[int]) -> list[int]:
+    """Compute expected band offsets for letter placement."""
     if not letter_band_sizes:
         return []
-    if direction in ("T2B", "B2T"):
-        band_span = width
-    elif direction in ("L2R", "R2L"):
-        band_span = height
-    else:
-        raise ValueError(f"unsupported direction: {direction}")
     tracking_sizes = [
         max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
         for size in letter_band_sizes
     ]
     total_span = sum(letter_band_sizes) + sum(tracking_sizes[:-1])
-    cursor = (band_span - total_span) / 2.0
+    cursor = -total_span / 2.0
     positions: list[int] = []
     for index_value, size in enumerate(letter_band_sizes):
         positions.append(int(round(cursor + size / 2.0)))
@@ -244,7 +236,7 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     ):
         assert len(band_sizes) == len(word)
         assert all(size >= 1 for size in band_sizes)
-        assert bands == expected_letter_bands(band_sizes, 64, 64, direction)
+        assert bands == expected_letter_bands(band_sizes)
 
     assert any(
         direction in ("T2B", "B2T") for direction in first_payload["directions"]
