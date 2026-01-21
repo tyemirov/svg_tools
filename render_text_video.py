@@ -47,8 +47,8 @@ VERTICAL_DIRECTIONS = ("T2B", "B2T")
 LETTER_ORDER_BY_DIRECTION = {
     "L2R": "forward",
     "R2L": "reverse",
-    "T2B": "forward",
-    "B2T": "reverse",
+    "T2B": "reverse",
+    "B2T": "forward",
 }
 LETTER_STAGGER_RATIO = 0.3
 LETTER_TRACKING_RATIO = 0.15

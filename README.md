@@ -226,7 +226,7 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 * `--remove-punctuation` strips punctuation from words before rendering.
 * `--background` applies only when no background image is used.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
-* Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for R2L/B2T so the first letter appears first at entry, and vertical directions also add staggered offsets.
+* Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for R2L/T2B so the first letter appears first at entry, and vertical directions also add staggered offsets.
 * `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, `letter_offsets`, `letter_bands`, and `letter_band_sizes` (band offsets centered on the motion axis), then exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
 
