@@ -45,6 +45,8 @@ DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
 HORIZONTAL_DIRECTIONS = ("L2R", "R2L")
 VERTICAL_DIRECTIONS = ("T2B", "B2T")
 LETTER_STAGGER_RATIO = 0.3
+LETTER_TRACKING_RATIO = 0.15
+MIN_TRACKING_PIXELS = 2
 LOGGER = logging.getLogger("render_text_video")
 
 FFMPEG_NOT_FOUND_CODE = "render_text_video.ffmpeg.not_found"
@@ -372,11 +374,34 @@ def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ..
     return tuple(offsets)
 
 
+def compute_letter_band_sizes(
+    letters: Sequence[LetterToken], direction: str
+) -> Tuple[int, ...]:
+    """Compute per-letter band sizes based on glyph metrics."""
+    sizes: list[int] = []
+    for letter in letters:
+        width = letter.bbox[2] - letter.bbox[0]
+        height = letter.bbox[3] - letter.bbox[1]
+        if direction in VERTICAL_DIRECTIONS:
+            size = width
+        elif direction in HORIZONTAL_DIRECTIONS:
+            size = height
+        else:
+            raise RenderPipelineError(
+                INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
+            )
+        sizes.append(max(1, int(size)))
+    return tuple(sizes)
+
+
 def compute_letter_band_positions(
-    letter_count: int, frame_width: int, frame_height: int, direction: str
+    letter_band_sizes: Sequence[int],
+    frame_width: int,
+    frame_height: int,
+    direction: str,
 ) -> Tuple[int, ...]:
     """Compute band positions for letters based on motion direction."""
-    if letter_count <= 0:
+    if not letter_band_sizes:
         return ()
     if direction in VERTICAL_DIRECTIONS:
         band_span = frame_width
@@ -386,11 +411,19 @@ def compute_letter_band_positions(
         raise RenderPipelineError(
             INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
         )
-    step_size = band_span / float(letter_count + 1)
-    return tuple(
-        int(round(step_size * (index_value + 1)))
-        for index_value in range(letter_count)
-    )
+    tracking_sizes = [
+        max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
+        for size in letter_band_sizes
+    ]
+    total_span = sum(letter_band_sizes) + sum(tracking_sizes[:-1])
+    cursor = (band_span - total_span) / 2.0
+    positions: list[int] = []
+    for index_value, size in enumerate(letter_band_sizes):
+        positions.append(int(round(cursor + size / 2.0)))
+        cursor += size
+        if index_value < len(letter_band_sizes) - 1:
+            cursor += tracking_sizes[index_value]
+    return tuple(positions)
 
 
 def apply_letter_progress(base_progress: float, offset: float) -> float:
@@ -497,6 +530,7 @@ def emit_directions(
     words: Sequence[str],
     letter_offsets: Sequence[Sequence[float]],
     letter_bands: Sequence[Sequence[int]],
+    letter_band_sizes: Sequence[Sequence[int]],
 ) -> None:
     """Emit direction choices to stdout."""
     payload = {
@@ -505,6 +539,7 @@ def emit_directions(
         "words": list(words),
         "letter_offsets": [list(offsets) for offsets in letter_offsets],
         "letter_bands": [list(bands) for bands in letter_bands],
+        "letter_band_sizes": [list(sizes) for sizes in letter_band_sizes],
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
 
@@ -563,7 +598,7 @@ def render_video(
                         len(current_token.letters), direction
                     )
                     current_letter_bands = compute_letter_band_positions(
-                        len(current_token.letters),
+                        compute_letter_band_sizes(current_token.letters, direction),
                         config.width,
                         config.height,
                         direction,
@@ -746,23 +781,32 @@ def main() -> int:
         rng = random.Random(request.direction_seed)
         directions = select_directions(len(plan.words), rng)
         font_sizes = select_font_sizes(len(plan.words), request.config, rng)
+        tokens = build_render_tokens(plan, request.config, font_sizes)
         letter_offsets = [
-            compute_letter_offsets(len(word), direction)
-            for word, direction in zip(plan.words, directions)
+            compute_letter_offsets(len(token.letters), direction)
+            for token, direction in zip(tokens, directions)
+        ]
+        letter_band_sizes = [
+            compute_letter_band_sizes(token.letters, direction)
+            for token, direction in zip(tokens, directions)
         ]
         letter_bands = [
             compute_letter_band_positions(
-                len(word), request.config.width, request.config.height, direction
+                sizes, request.config.width, request.config.height, direction
             )
-            for word, direction in zip(plan.words, directions)
+            for sizes, direction in zip(letter_band_sizes, directions)
         ]
         if request.emit_directions:
             emit_directions(
-                directions, font_sizes, plan.words, letter_offsets, letter_bands
+                directions,
+                font_sizes,
+                plan.words,
+                letter_offsets,
+                letter_bands,
+                letter_band_sizes,
             )
             return 0
         validate_ffmpeg_capabilities()
-        tokens = build_render_tokens(plan, request.config, font_sizes)
         render_video(request.config, plan, tokens, directions, request.background_image)
         return 0
     except RenderValidationError as exc:

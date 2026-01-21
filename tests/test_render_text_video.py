@@ -9,6 +9,9 @@ import zlib
 from pathlib import Path
 from typing import List
 
+LETTER_TRACKING_RATIO = 0.15
+MIN_TRACKING_PIXELS = 2
+
 
 def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
     """Run render_text_video.py with the provided arguments."""
@@ -91,20 +94,30 @@ def expected_font_size_range(width: int, height: int) -> tuple[int, int]:
 
 
 def expected_letter_bands(
-    letter_count: int, width: int, height: int, direction: str
+    letter_band_sizes: list[int], width: int, height: int, direction: str
 ) -> list[int]:
     """Compute expected band positions for letter placement."""
+    if not letter_band_sizes:
+        return []
     if direction in ("T2B", "B2T"):
         band_span = width
     elif direction in ("L2R", "R2L"):
         band_span = height
     else:
         raise ValueError(f"unsupported direction: {direction}")
-    step_size = band_span / float(letter_count + 1)
-    return [
-        int(round(step_size * (index_value + 1)))
-        for index_value in range(letter_count)
+    tracking_sizes = [
+        max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
+        for size in letter_band_sizes
     ]
+    total_span = sum(letter_band_sizes) + sum(tracking_sizes[:-1])
+    cursor = (band_span - total_span) / 2.0
+    positions: list[int] = []
+    for index_value, size in enumerate(letter_band_sizes):
+        positions.append(int(round(cursor + size / 2.0)))
+        cursor += size
+        if index_value < len(letter_band_sizes) - 1:
+            cursor += tracking_sizes[index_value]
+    return positions
 
 
 def test_srt_window_too_small(tmp_path: Path) -> None:
@@ -195,6 +208,7 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     assert first_payload["words"] == second_payload["words"]
     assert first_payload["letter_offsets"] == second_payload["letter_offsets"]
     assert first_payload["letter_bands"] == second_payload["letter_bands"]
+    assert first_payload["letter_band_sizes"] == second_payload["letter_band_sizes"]
 
     expected_min_size, expected_max_size = expected_font_size_range(64, 64)
     for font_size in first_payload["font_sizes"]:
@@ -205,12 +219,15 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     second_offsets = first_payload["letter_offsets"][1]
     assert all(offset == 0 for offset in second_offsets)
 
-    for word, direction, bands in zip(
+    for word, direction, bands, band_sizes in zip(
         first_payload["words"],
         first_payload["directions"],
         first_payload["letter_bands"],
+        first_payload["letter_band_sizes"],
     ):
-        assert bands == expected_letter_bands(len(word), 64, 64, direction)
+        assert len(band_sizes) == len(word)
+        assert all(size >= 1 for size in band_sizes)
+        assert bands == expected_letter_bands(band_sizes, 64, 64, direction)
 
     args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
     other = run_render_text_video(args_other_seed, repo_root)
