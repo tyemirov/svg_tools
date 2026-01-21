@@ -120,6 +120,23 @@ def expected_letter_bands(
     return positions
 
 
+def assert_non_overlapping_bands(bands: list[int], sizes: list[int]) -> None:
+    """Assert bands do not overlap given their sizes."""
+    intervals = sorted(
+        (
+            band_center - band_size / 2.0,
+            band_center + band_size / 2.0,
+        )
+        for band_center, band_size in zip(bands, sizes)
+    )
+    for (previous_left, previous_right), (current_left, current_right) in zip(
+        intervals, intervals[1:]
+    ):
+        assert previous_left <= previous_right
+        assert current_left <= current_right
+        assert current_left >= previous_right
+
+
 def test_srt_window_too_small(tmp_path: Path) -> None:
     """Fail when an SRT window is too short for its words."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -228,6 +245,17 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
         assert len(band_sizes) == len(word)
         assert all(size >= 1 for size in band_sizes)
         assert bands == expected_letter_bands(band_sizes, 64, 64, direction)
+
+    assert any(
+        direction in ("T2B", "B2T") for direction in first_payload["directions"]
+    )
+    for direction, bands, band_sizes in zip(
+        first_payload["directions"],
+        first_payload["letter_bands"],
+        first_payload["letter_band_sizes"],
+    ):
+        if direction in ("T2B", "B2T"):
+            assert_non_overlapping_bands(bands, band_sizes)
 
     args_other_seed = base_args + ["--emit-directions", "--direction-seed", "8"]
     other = run_render_text_video(args_other_seed, repo_root)

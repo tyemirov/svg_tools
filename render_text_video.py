@@ -325,39 +325,47 @@ def compute_letter_position(
     progress_value: float,
     frame_width: int,
     frame_height: int,
-    letter_width: int,
-    letter_height: int,
+    letter_bbox: Tuple[int, int, int, int],
     band_position: int,
 ) -> Tuple[int, int]:
     """Compute a letter position given a motion direction and progress."""
+    left, top, right, bottom = letter_bbox
+    letter_width = max(1, right - left)
+    letter_height = max(1, bottom - top)
+    center_offset_x = (left + right) / 2.0
+    center_offset_y = (top + bottom) / 2.0
     clamped_progress = min(1.0, max(0.0, progress_value))
 
     if direction == "L2R":
-        start_x = -letter_width
-        end_x = frame_width
-        x_value = int(round(start_x + (end_x - start_x) * clamped_progress))
-        y_value = int(round(band_position - letter_height / 2))
+        start_center_x = -letter_width / 2.0
+        end_center_x = frame_width + letter_width / 2.0
+        center_x = start_center_x + (end_center_x - start_center_x) * clamped_progress
+        x_value = int(round(center_x - center_offset_x))
+        y_value = int(round(band_position - center_offset_y))
         return (x_value, y_value)
 
     if direction == "R2L":
-        start_x = frame_width
-        end_x = -letter_width
-        x_value = int(round(start_x + (end_x - start_x) * clamped_progress))
-        y_value = int(round(band_position - letter_height / 2))
+        start_center_x = frame_width + letter_width / 2.0
+        end_center_x = -letter_width / 2.0
+        center_x = start_center_x + (end_center_x - start_center_x) * clamped_progress
+        x_value = int(round(center_x - center_offset_x))
+        y_value = int(round(band_position - center_offset_y))
         return (x_value, y_value)
 
     if direction == "T2B":
-        start_y = -letter_height
-        end_y = frame_height
-        y_value = int(round(start_y + (end_y - start_y) * clamped_progress))
-        x_value = int(round(band_position - letter_width / 2))
+        start_center_y = -letter_height / 2.0
+        end_center_y = frame_height + letter_height / 2.0
+        center_y = start_center_y + (end_center_y - start_center_y) * clamped_progress
+        y_value = int(round(center_y - center_offset_y))
+        x_value = int(round(band_position - center_offset_x))
         return (x_value, y_value)
 
     if direction == "B2T":
-        start_y = frame_height
-        end_y = -letter_height
-        y_value = int(round(start_y + (end_y - start_y) * clamped_progress))
-        x_value = int(round(band_position - letter_width / 2))
+        start_center_y = frame_height + letter_height / 2.0
+        end_center_y = -letter_height / 2.0
+        center_y = start_center_y + (end_center_y - start_center_y) * clamped_progress
+        y_value = int(round(center_y - center_offset_y))
+        x_value = int(round(band_position - center_offset_x))
         return (x_value, y_value)
 
     raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
@@ -618,15 +626,12 @@ def render_video(
                     letter_progress = apply_letter_progress(
                         progress, current_letter_offsets[letter_index]
                     )
-                    letter_width = letter.bbox[2] - letter.bbox[0]
-                    letter_height = letter.bbox[3] - letter.bbox[1]
                     pos_x, pos_y = compute_letter_position(
                         direction=direction,
                         progress_value=letter_progress,
                         frame_width=config.width,
                         frame_height=config.height,
-                        letter_width=letter_width,
-                        letter_height=letter_height,
+                        letter_bbox=letter.bbox,
                         band_position=current_letter_bands[letter_index],
                     )
                     draw_context.text(
