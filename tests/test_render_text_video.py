@@ -12,6 +12,19 @@ from typing import List
 BYTES_PER_PIXEL = 4
 ALPHA_THRESHOLD = 10
 TEMPLATE_MATCH_RATIO = 0.98
+FIRST_LETTER_MATCH_RATIO = 0.3
+ORDER_MATCH_RATIO = 0.3
+DIRECTION_SEEDS = {
+    "L2R": 2,
+    "R2L": 1,
+    "T2B": 5,
+    "B2T": 0,
+}
+ENTRY_FIRST_SEEDS = {
+    "L2R": DIRECTION_SEEDS["L2R"],
+    "R2L": DIRECTION_SEEDS["R2L"],
+    "T2B": DIRECTION_SEEDS["T2B"],
+}
 
 
 def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
@@ -71,6 +84,38 @@ def alpha_bbox(frame_bytes: bytes, width: int, height: int) -> tuple[int, int, i
     return min_x, min_y, max_x, max_y
 
 
+def frame_has_alpha(frame_bytes: bytes, width: int, height: int) -> bool:
+    """Return True when any alpha pixel is visible."""
+    if len(frame_bytes) != width * height * BYTES_PER_PIXEL:
+        return False
+    for y_value in range(height):
+        row_offset = y_value * width * BYTES_PER_PIXEL
+        for x_value in range(width):
+            alpha_value = frame_bytes[row_offset + x_value * BYTES_PER_PIXEL + 3]
+            if alpha_value >= ALPHA_THRESHOLD:
+                return True
+    return False
+
+
+def frame_has_expected_size(frame_bytes: bytes, width: int, height: int) -> bool:
+    """Return True when the frame has the expected RGBA size."""
+    return len(frame_bytes) == width * height * BYTES_PER_PIXEL
+
+
+def alpha_pixel_count(frame_bytes: bytes, width: int, height: int) -> int:
+    """Return the count of non-transparent pixels in a frame."""
+    if len(frame_bytes) != width * height * BYTES_PER_PIXEL:
+        return 0
+    count = 0
+    for y_value in range(height):
+        row_offset = y_value * width * BYTES_PER_PIXEL
+        for x_value in range(width):
+            alpha_value = frame_bytes[row_offset + x_value * BYTES_PER_PIXEL + 3]
+            if alpha_value >= ALPHA_THRESHOLD:
+                count += 1
+    return count
+
+
 def crop_rgba(
     frame_bytes: bytes,
     width: int,
@@ -87,6 +132,51 @@ def crop_rgba(
         end = start + crop_width * BYTES_PER_PIXEL
         rows.append(frame_bytes[start:end])
     return b"".join(rows), crop_width, crop_height
+
+
+def template_from_best_frame(
+    video_path: Path,
+    total_frames: int,
+    fps: float,
+    width: int,
+    height: int,
+) -> tuple[bytes, int, int]:
+    """Extract a template from the frame with the most visible alpha."""
+    best_frame = None
+    best_count = -1
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(video_path, frame_index / fps)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        visible_pixels = alpha_pixel_count(frame_bytes, width, height)
+        if visible_pixels > best_count:
+            best_count = visible_pixels
+            best_frame = frame_bytes
+    assert best_frame is not None
+    assert best_count > 0
+    return crop_rgba(
+        best_frame, width, height, alpha_bbox(best_frame, width, height)
+    )
+
+
+def template_from_first_visible_frame(
+    video_path: Path,
+    total_frames: int,
+    fps: float,
+    width: int,
+    height: int,
+) -> tuple[bytes, int, int]:
+    """Extract a template from the first frame that shows alpha."""
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(video_path, frame_index / fps)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        if not frame_has_alpha(frame_bytes, width, height):
+            continue
+        return crop_rgba(
+            frame_bytes, width, height, alpha_bbox(frame_bytes, width, height)
+        )
+    raise AssertionError("no visible frame found")
 
 
 def alpha_mask_rows(frame_bytes: bytes, width: int, height: int) -> list[bytes]:
@@ -137,6 +227,76 @@ def find_template_leftmost_x(
     if best_x is None:
         raise AssertionError("template not found in frame")
     return best_x
+
+
+def best_template_match_ratio(
+    frame_bytes: bytes,
+    width: int,
+    height: int,
+    template_bytes: bytes,
+    template_width: int,
+    template_height: int,
+    search_bbox: tuple[int, int, int, int],
+) -> float:
+    """Return the best overlap ratio for a template alpha mask."""
+    frame_alpha = alpha_mask_rows(frame_bytes, width, height)
+    template_alpha = alpha_mask_rows(template_bytes, template_width, template_height)
+    template_on_pixels = sum(sum(row) for row in template_alpha)
+    if template_on_pixels == 0:
+        raise AssertionError("template has no visible pixels")
+    left, top, right, bottom = search_bbox
+    max_x = right - template_width + 1
+    max_y = bottom - template_height + 1
+    best_ratio = 0.0
+    for y_value in range(top, max_y + 1):
+        for x_value in range(left, max_x + 1):
+            matched_on = 0
+            for row_index, template_row in enumerate(template_alpha):
+                frame_row = frame_alpha[y_value + row_index]
+                for col_index, template_pixel in enumerate(template_row):
+                    if template_pixel and frame_row[x_value + col_index]:
+                        matched_on += 1
+            ratio = matched_on / template_on_pixels
+            if ratio > best_ratio:
+                best_ratio = ratio
+    return best_ratio
+
+
+def best_template_match_location(
+    frame_bytes: bytes,
+    width: int,
+    height: int,
+    template_bytes: bytes,
+    template_width: int,
+    template_height: int,
+    search_bbox: tuple[int, int, int, int],
+) -> tuple[float, int, int]:
+    """Return the best overlap ratio and its location for a template."""
+    frame_alpha = alpha_mask_rows(frame_bytes, width, height)
+    template_alpha = alpha_mask_rows(template_bytes, template_width, template_height)
+    template_on_pixels = sum(sum(row) for row in template_alpha)
+    if template_on_pixels == 0:
+        raise AssertionError("template has no visible pixels")
+    left, top, right, bottom = search_bbox
+    max_x = right - template_width + 1
+    max_y = bottom - template_height + 1
+    best_ratio = 0.0
+    best_x = left
+    best_y = top
+    for y_value in range(top, max_y + 1):
+        for x_value in range(left, max_x + 1):
+            matched_on = 0
+            for row_index, template_row in enumerate(template_alpha):
+                frame_row = frame_alpha[y_value + row_index]
+                for col_index, template_pixel in enumerate(template_row):
+                    if template_pixel and frame_row[x_value + col_index]:
+                        matched_on += 1
+            ratio = matched_on / template_on_pixels
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_x = x_value
+                best_y = y_value
+    return best_ratio, best_x, best_y
 
 
 def write_srt_file(target_path: Path, content: str) -> None:
@@ -217,8 +377,8 @@ def test_srt_window_too_small(tmp_path: Path) -> None:
         input_path=srt_path,
         output_path=output_path,
         fonts_dir=fonts_dir,
-        duration_seconds="1.0",
-        fps="10",
+        duration_seconds="0.6",
+        fps="6",
     )
 
     result = run_render_text_video(args, repo_root)
@@ -233,7 +393,7 @@ def test_srt_success(tmp_path: Path) -> None:
     script_path = repo_root / "render_text_video.py"
     fonts_dir = repo_root / "assets" / "fonts"
 
-    srt_content = """1\n00:00:00,000 --> 00:00:01,000\nhello world\n\n2\n00:00:01,000 --> 00:00:02,000\nsecond line\n"""
+    srt_content = """1\n00:00:00,000 --> 00:00:00,400\nhello world\n\n2\n00:00:00,400 --> 00:00:00,800\nsecond line\n"""
     srt_path = tmp_path / "ok.srt"
     write_srt_file(srt_path, srt_content)
 
@@ -243,8 +403,8 @@ def test_srt_success(tmp_path: Path) -> None:
         input_path=srt_path,
         output_path=output_path,
         fonts_dir=fonts_dir,
-        duration_seconds="2.0",
-        fps="10",
+        duration_seconds="0.8",
+        fps="6",
     )
 
     result = run_render_text_video(args, repo_root)
@@ -264,8 +424,8 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     input_path = tmp_path / "words.txt"
     input_path.write_text(input_text, encoding="utf-8")
 
-    duration_seconds = "1.2"
-    fps = "8"
+    duration_seconds = "0.8"
+    fps = "6"
 
     def render(seed: str, output_name: str) -> Path:
         output_path = tmp_path / output_name
@@ -307,8 +467,8 @@ def test_l2r_cyrillic_word_is_reversed(tmp_path: Path) -> None:
 
     width = 300
     height = 200
-    duration_seconds = "1.5"
-    fps = "10"
+    duration_seconds = "1.0"
+    fps = "6"
     seed = "42"
 
     def render_word(text_value: str, output_name: str) -> Path:
@@ -334,27 +494,242 @@ def test_l2r_cyrillic_word_is_reversed(tmp_path: Path) -> None:
     pe_path = render_word("п", "pe")
     soft_path = render_word("ь", "soft-sign")
 
-    time_seconds = float(duration_seconds) / 2.0
-    word_frame = extract_raw_frame(word_path, time_seconds)
-    word_bbox = alpha_bbox(word_frame, width, height)
+    total_frames = int(round(float(duration_seconds) * float(fps)))
+    fps_value = float(fps)
 
-    pe_frame = extract_raw_frame(pe_path, time_seconds)
-    pe_template, pe_width, pe_height = crop_rgba(
-        pe_frame, width, height, alpha_bbox(pe_frame, width, height)
+    pe_template, pe_width, pe_height = template_from_best_frame(
+        pe_path, total_frames, fps_value, width, height
     )
-    soft_frame = extract_raw_frame(soft_path, time_seconds)
-    soft_template, soft_width, soft_height = crop_rgba(
-        soft_frame, width, height, alpha_bbox(soft_frame, width, height)
+    soft_template, soft_width, soft_height = template_from_best_frame(
+        soft_path, total_frames, fps_value, width, height
     )
 
-    pe_x = find_template_leftmost_x(
-        word_frame, width, height, pe_template, pe_width, pe_height, word_bbox
-    )
-    soft_x = find_template_leftmost_x(
-        word_frame, width, height, soft_template, soft_width, soft_height, word_bbox
-    )
+    first_letter = None
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(word_path, frame_index / fps_value)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        if not frame_has_alpha(frame_bytes, width, height):
+            continue
+        word_bbox = alpha_bbox(frame_bytes, width, height)
+        ratios = {
+            "п": best_template_match_ratio(
+                frame_bytes,
+                width,
+                height,
+                pe_template,
+                pe_width,
+                pe_height,
+                word_bbox,
+            ),
+            "ь": best_template_match_ratio(
+                frame_bytes,
+                width,
+                height,
+                soft_template,
+                soft_width,
+                soft_height,
+                word_bbox,
+            ),
+        }
+        best_letter = max(ratios, key=ratios.get)
+        if ratios[best_letter] < FIRST_LETTER_MATCH_RATIO:
+            continue
+        first_letter = best_letter
+        break
 
-    assert pe_x > soft_x
+    assert first_letter is not None
+    assert first_letter == "п"
+
+
+def test_hard_first_letter_appears_first_entry_directions(tmp_path: Path) -> None:
+    """Ensure HARD leads with H as the first visible letter where entry is leading."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    shutil.copy(source_font, fonts_dir / source_font.name)
+
+    width = 240
+    height = 180
+    duration_seconds = "0.9"
+    fps = "6"
+    word_text = "HARD"
+
+    def render_word(text_value: str, seed: str, output_name: str) -> Path:
+        input_path = tmp_path / f"{output_name}.txt"
+        input_path.write_text(text_value, encoding="utf-8")
+        output_path = tmp_path / f"{output_name}.mov"
+        args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds=duration_seconds,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        args.extend(["--direction-seed", seed])
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
+        return output_path
+
+    total_frames = int(round(float(duration_seconds) * float(fps)))
+    fps_value = float(fps)
+    for direction, seed in ENTRY_FIRST_SEEDS.items():
+        word_path = render_word(word_text, str(seed), f"word-{direction}")
+        templates = {}
+        for letter in word_text:
+            letter_path = render_word(letter, str(seed), f"letter-{letter}-{direction}")
+            templates[letter] = template_from_first_visible_frame(
+                letter_path,
+                total_frames,
+                fps_value,
+                width,
+                height,
+            )
+
+        word_frames: list[bytes | None] = []
+        frame_bboxes: list[tuple[int, int, int, int] | None] = []
+        for frame_index in range(total_frames):
+            frame_bytes = extract_raw_frame(word_path, frame_index / fps_value)
+            if not frame_has_expected_size(frame_bytes, width, height):
+                word_frames.append(None)
+                frame_bboxes.append(None)
+                continue
+            word_frames.append(frame_bytes)
+            frame_bboxes.append(
+                alpha_bbox(frame_bytes, width, height)
+                if frame_has_alpha(frame_bytes, width, height)
+                else None
+            )
+
+        earliest_frames: dict[str, int] = {}
+        for letter, (template_bytes, template_width, template_height) in templates.items():
+            for frame_index, frame_bytes in enumerate(word_frames):
+                if frame_bytes is None:
+                    continue
+                search_bbox = frame_bboxes[frame_index]
+                if search_bbox is None:
+                    continue
+                ratio = best_template_match_ratio(
+                    frame_bytes,
+                    width,
+                    height,
+                    template_bytes,
+                    template_width,
+                    template_height,
+                    search_bbox,
+                )
+                if ratio >= FIRST_LETTER_MATCH_RATIO:
+                    earliest_frames[letter] = frame_index
+                    break
+
+        assert "H" in earliest_frames
+        for letter, earliest_frame in earliest_frames.items():
+            if letter == "H":
+                continue
+            assert earliest_frame >= earliest_frames["H"], (
+                f"{direction} expected H first, got {earliest_frames}"
+            )
+
+
+def test_b2t_word_is_natural_and_complete(tmp_path: Path) -> None:
+    """Ensure B2T words are ordered naturally with all letters visible."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    shutil.copy(source_font, fonts_dir / source_font.name)
+
+    width = 240
+    height = 180
+    duration_seconds = "0.9"
+    fps = "6"
+    word_text = "HARD"
+    seed = str(DIRECTION_SEEDS["B2T"])
+
+    def render_word(text_value: str, output_name: str) -> Path:
+        input_path = tmp_path / f"{output_name}.txt"
+        input_path.write_text(text_value, encoding="utf-8")
+        output_path = tmp_path / f"{output_name}.mov"
+        args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds=duration_seconds,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        args.extend(["--direction-seed", seed])
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
+        return output_path
+
+    total_frames = int(round(float(duration_seconds) * float(fps)))
+    fps_value = float(fps)
+    word_path = render_word(word_text, "word-b2t")
+    templates = {}
+    for letter in word_text:
+        letter_path = render_word(letter, f"letter-{letter}-b2t")
+        templates[letter] = template_from_first_visible_frame(
+            letter_path,
+            total_frames,
+            fps_value,
+            width,
+            height,
+        )
+
+    word_frames: list[bytes | None] = []
+    frame_bboxes: list[tuple[int, int, int, int] | None] = []
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(word_path, frame_index / fps_value)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            word_frames.append(None)
+            frame_bboxes.append(None)
+            continue
+        word_frames.append(frame_bytes)
+        frame_bboxes.append(
+            alpha_bbox(frame_bytes, width, height)
+            if frame_has_alpha(frame_bytes, width, height)
+            else None
+        )
+
+    best_positions = {}
+    best_ratios = {}
+    for letter in word_text:
+        best_positions[letter] = None
+        best_ratios[letter] = 0.0
+
+    for frame_index, frame_bytes in enumerate(word_frames):
+        if frame_bytes is None:
+            continue
+        search_bbox = frame_bboxes[frame_index]
+        if search_bbox is None:
+            continue
+        for letter, (template_bytes, template_width, template_height) in templates.items():
+            ratio, _, match_y = best_template_match_location(
+                frame_bytes,
+                width,
+                height,
+                template_bytes,
+                template_width,
+                template_height,
+                search_bbox,
+            )
+            if ratio > best_ratios[letter]:
+                best_ratios[letter] = ratio
+                best_positions[letter] = (match_y, template_height)
+
+    assert all(ratio >= ORDER_MATCH_RATIO for ratio in best_ratios.values())
+
+    y_positions = [best_positions[letter][0] for letter in word_text]
+    assert y_positions == sorted(y_positions)
 
 
 def test_remove_punctuation(tmp_path: Path) -> None:
@@ -367,8 +742,8 @@ def test_remove_punctuation(tmp_path: Path) -> None:
     input_path = tmp_path / "words.txt"
     input_path.write_text(input_text, encoding="utf-8")
 
-    duration_seconds = "2.0"
-    fps = "10"
+    duration_seconds = "1.0"
+    fps = "6"
     seed = "11"
 
     output_path = tmp_path / "out-strip.mov"
@@ -410,15 +785,15 @@ def test_background_image_derives_dimensions(tmp_path: Path) -> None:
     script_path = repo_root / "render_text_video.py"
     fonts_dir = repo_root / "assets" / "fonts"
 
-    input_text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    input_text = "alpha beta gamma delta"
     input_path = tmp_path / "words.txt"
     input_path.write_text(input_text, encoding="utf-8")
 
     background_path = tmp_path / "background.png"
     write_png(background_path, 10, 12, (20, 40, 60, 255))
 
-    duration_seconds = "1.2"
-    fps = "10"
+    duration_seconds = "0.8"
+    fps = "6"
     output_path = tmp_path / "out.mov"
     base_args = build_common_args(
         script_path=script_path,

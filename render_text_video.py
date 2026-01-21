@@ -364,8 +364,8 @@ def compute_letter_position(
     left, top, right, bottom = letter_bbox
     letter_width = max(1, right - left)
     letter_height = max(1, bottom - top)
-    center_offset_x = (left + right) / 2.0
-    center_offset_y = (top + bottom) / 2.0
+    center_offset_x = letter_width / 2.0
+    center_offset_y = letter_height / 2.0
     clamped_progress = min(1.0, max(0.0, progress_value))
 
     if direction == "L2R":
@@ -479,6 +479,184 @@ def compute_letter_band_positions(
     if reverse_order:
         positions.reverse()
     return tuple(positions)
+
+
+def adjust_letter_band_positions(
+    band_positions: Sequence[int],
+    letters: Sequence[LetterToken],
+    direction: str,
+) -> Tuple[int, ...]:
+    """Return band positions (cropped glyphs do not need bearing adjustments)."""
+    if not band_positions:
+        return ()
+    return tuple(band_positions)
+
+
+def compute_entry_edge_position(
+    direction: str,
+    band_position: int,
+    letter_bbox: Tuple[int, int, int, int],
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    """Compute the entry-edge coordinate at progress zero for a letter."""
+    left, top, right, bottom = letter_bbox
+    letter_width = max(1, right - left)
+    letter_height = max(1, bottom - top)
+    center_offset_x = letter_width / 2.0
+    center_offset_y = letter_height / 2.0
+
+    if direction == "L2R":
+        start_center_x = -letter_width / 2.0
+        entry_offset = letter_width - center_offset_x
+        return start_center_x + band_position + entry_offset
+
+    if direction == "R2L":
+        start_center_x = frame_width + letter_width / 2.0
+        entry_offset = -center_offset_x
+        return start_center_x + band_position + entry_offset
+
+    if direction == "T2B":
+        start_center_y = -letter_height / 2.0
+        entry_offset = letter_height - center_offset_y
+        return start_center_y + band_position + entry_offset
+
+    if direction == "B2T":
+        start_center_y = frame_height + letter_height / 2.0
+        entry_offset = -center_offset_y
+        return start_center_y + band_position + entry_offset
+
+    raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
+
+
+def compute_band_position_limits(
+    direction: str,
+    letter_bbox: Tuple[int, int, int, int],
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[float, float]:
+    """Return min/max band offsets that keep a letter path intersecting the frame."""
+    left, top, right, bottom = letter_bbox
+    letter_width = max(1, right - left)
+    letter_height = max(1, bottom - top)
+    center_offset_x = letter_width / 2.0
+    center_offset_y = letter_height / 2.0
+
+    if direction == "L2R":
+        start_center = -letter_width / 2.0
+        end_center = frame_width + letter_width / 2.0
+        min_center = center_offset_x - letter_width
+        max_center = frame_width + center_offset_x
+    elif direction == "R2L":
+        start_center = frame_width + letter_width / 2.0
+        end_center = -letter_width / 2.0
+        min_center = center_offset_x - letter_width
+        max_center = frame_width + center_offset_x
+    elif direction == "T2B":
+        start_center = -letter_height / 2.0
+        end_center = frame_height + letter_height / 2.0
+        min_center = center_offset_y - letter_height
+        max_center = frame_height + center_offset_y
+    elif direction == "B2T":
+        start_center = frame_height + letter_height / 2.0
+        end_center = -letter_height / 2.0
+        min_center = center_offset_y - letter_height
+        max_center = frame_height + center_offset_y
+    else:
+        raise RenderPipelineError(
+            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
+        )
+
+    min_allowed = min_center - max(start_center, end_center)
+    max_allowed = max_center - min(start_center, end_center)
+    return (min_allowed, max_allowed)
+
+
+def normalize_letter_band_positions(
+    band_positions: Sequence[int],
+    letters: Sequence[LetterToken],
+    direction: str,
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[int, ...]:
+    """Normalize band positions to keep all letters visible."""
+    if not band_positions:
+        return ()
+    if not letters:
+        return tuple(band_positions)
+
+    limits = [
+        compute_band_position_limits(direction, letter.bbox, frame_width, frame_height)
+        for letter in letters
+    ]
+    min_limit = max(limit[0] for limit in limits)
+    max_limit = min(limit[1] for limit in limits)
+    if min_limit > max_limit:
+        return tuple(band_positions)
+
+    min_pos = min(band_positions)
+    max_pos = max(band_positions)
+    if min_pos == max_pos:
+        target = min(max(min_pos, min_limit), max_limit)
+        shift = target - min_pos
+        return tuple(int(round(position + shift)) for position in band_positions)
+
+    span = max_pos - min_pos
+    limit_span = max_limit - min_limit
+    scale = min(1.0, limit_span / span) if span else 1.0
+    center = (min_pos + max_pos) / 2.0
+    target_center = (min_limit + max_limit) / 2.0
+    return tuple(
+        int(round(target_center + (position - center) * scale))
+        for position in band_positions
+    )
+
+
+def align_letter_band_positions_to_entry(
+    band_positions: Sequence[int],
+    letters: Sequence[LetterToken],
+    direction: str,
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[int, ...]:
+    """Shift band positions so the first letter touches the entry edge."""
+    if not band_positions:
+        return ()
+    if not letters:
+        return tuple(band_positions)
+
+    entry_edge = compute_entry_edge_position(
+        direction,
+        band_positions[0],
+        letters[0].bbox,
+        frame_width,
+        frame_height,
+    )
+    if direction in ("L2R", "T2B"):
+        desired_edge = 0.0
+    elif direction == "R2L":
+        desired_edge = float(frame_width)
+    elif direction == "B2T":
+        desired_edge = float(frame_height)
+    else:
+        raise RenderPipelineError(
+            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
+        )
+
+    shift = desired_edge - entry_edge
+    min_shift = float("-inf")
+    max_shift = float("inf")
+    for position, letter in zip(band_positions, letters):
+        min_allowed, max_allowed = compute_band_position_limits(
+            direction, letter.bbox, frame_width, frame_height
+        )
+        min_shift = max(min_shift, min_allowed - position)
+        max_shift = min(max_shift, max_allowed - position)
+    if min_shift <= max_shift:
+        shift = min(max(shift, min_shift), max_shift)
+    else:
+        shift = 0.0
+    return tuple(int(round(position + shift)) for position in band_positions)
 
 
 def apply_letter_progress(base_progress: float, offset: float) -> float:
@@ -656,6 +834,23 @@ def render_video(
                     current_letter_bands = compute_letter_band_positions(
                         compute_letter_band_sizes(current_token.letters, direction),
                         should_reverse_letter_order(direction),
+                    )
+                    current_letter_bands = adjust_letter_band_positions(
+                        current_letter_bands, current_token.letters, direction
+                    )
+                    current_letter_bands = normalize_letter_band_positions(
+                        current_letter_bands,
+                        current_token.letters,
+                        direction,
+                        config.width,
+                        config.height,
+                    )
+                    current_letter_bands = align_letter_band_positions_to_entry(
+                        current_letter_bands,
+                        current_token.letters,
+                        direction,
+                        config.width,
+                        config.height,
                     )
                 token = current_token
                 if token is None:
@@ -837,8 +1032,26 @@ def main() -> int:
             for token, direction in zip(tokens, directions)
         ]
         letter_bands = [
-            compute_letter_band_positions(sizes, should_reverse_letter_order(direction))
-            for sizes, direction in zip(letter_band_sizes, directions)
+            align_letter_band_positions_to_entry(
+                normalize_letter_band_positions(
+                    adjust_letter_band_positions(
+                        compute_letter_band_positions(
+                            sizes, should_reverse_letter_order(direction)
+                        ),
+                        token.letters,
+                        direction,
+                    ),
+                    token.letters,
+                    direction,
+                    request.config.width,
+                    request.config.height,
+                ),
+                token.letters,
+                direction,
+                request.config.width,
+                request.config.height,
+            )
+            for sizes, token, direction in zip(letter_band_sizes, tokens, directions)
         ]
         if request.emit_directions:
             emit_directions(
