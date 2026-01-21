@@ -28,6 +28,7 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 - [x] [B305] Ensure the first letter leads movement in every direction (no backwards reveal). Resolved with direction-aware band ordering and stagger offsets.
 - [x] [B306] Ensure first-letter entry order for L2R/T2B directions. Resolved with entry-side band reversal and updated tests/docs.
 - [x] [B307] Ensure entry-side band ordering for all directions matches first-letter entry. Resolved with direction→order map and updated tests/docs.
+- [x] [B308] Add integration test confirming top-to-bottom words lead with the first letter (HARD example). Resolved with deterministic T2B band-order test.
 
 ## Maintenance (400–499)
 
@@ -87,3 +88,4 @@ proceed
 - [B305] Priority: high. Goal: ensure the first letter appears first regardless of movement direction. Dependencies: band ordering and stagger offsets aligned to direction. Docs: update `README.md` notes for letter-leading behavior. Plan: reverse band order for reverse directions and invert stagger offsets so first letter leads, add tests, run `make ci`. Deliverable: consistent first-letter-leading motion.
 - [B306] Priority: high. Goal: ensure first-letter entry order for L2R/T2B so the leading letter appears first when entering the frame. Dependencies: band ordering tied to entry side. Docs: update `README.md` note. Plan: update band reversal set, adjust tests, run `make ci`. Deliverable: correct entry-side ordering.
 - [B307] Priority: high. Goal: ensure entry-side band ordering across all directions so the first letter enters first. Dependencies: direction→letter-order map. Docs: update `README.md` note. Plan: add ordering map, update tests, run `make ci`. Deliverable: consistent entry-side ordering.
+- [B308] Priority: medium. Goal: add integration test verifying top-to-bottom words lead with the first letter (HARD). Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for T2B first-letter entry.
