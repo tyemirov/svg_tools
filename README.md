@@ -213,6 +213,7 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
     [--fonts-dir <PATH>] \
     [--direction-seed <INT>] \
     [--remove-punctuation] \
+    [--subtitle-renderer <motion|rsvp_orp>] \
     [--emit-directions]
 ```
 
@@ -224,6 +225,8 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
 * `--remove-punctuation` strips punctuation from words before rendering.
+* `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT input (single word at a time with ORP anchoring).
+* RSVP mode requires SRT timing and does not use motion directions or per-word random sizing.
 * `--background` applies only when no background image is used.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
 * Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for L2R/T2B so the first letter leads the motion, and vertical directions also add staggered offsets.
