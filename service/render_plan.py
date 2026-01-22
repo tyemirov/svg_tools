@@ -280,8 +280,16 @@ def build_rsvp_render_plan(
                 INVALID_WINDOW_CODE, "subtitle window too short for RSVP pauses"
             )
 
+        min_total = min_frames * word_count
+        max_total = max_frames * word_count
+        if available_frames < min_total:
+            raise RenderValidationError(
+                INVALID_WINDOW_CODE, "subtitle window too short for RSVP timing"
+            )
+        target_frames = min(available_frames, max_total)
+
         base_frames = allocate_weighted_frames(
-            weights, available_frames, min_frames, max_frames
+            weights, target_frames, min_frames, max_frames
         )
         per_word_frames = [
             base + (pause_frames if flagged else 0)
@@ -301,9 +309,9 @@ def build_rsvp_render_plan(
             cursor_frame += frame_count
             words.append(word)
 
-        if cursor_frame != window_end_frame:
+        if cursor_frame > window_end_frame:
             raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window timing mismatch"
+                INVALID_WINDOW_CODE, "subtitle window timing overflow"
             )
 
         token_offset += word_count

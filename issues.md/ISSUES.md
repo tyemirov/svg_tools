@@ -148,3 +148,9 @@ proceed
 - [B311] Priority: high. Goal: reduce alpha output file size while keeping alpha and acceptable speed. Dependencies: ffmpeg encoder/pix_fmt support. Docs: update README/ARCHITECTURE. Plan: tune alpha codec/compression defaults, adjust render-based tests for lossy output if needed, run `make ci`. Deliverable: smaller alpha output by default.
 - [x] [B313] Resolved B2T letter ordering/visibility issues with normalized band positions, entry alignment, and render-based tests for natural order and completeness.
 - [x] [F100] Resolved RSVP ORP renderer with SRT-only mode, ORP anchoring, weighted timing + punctuation pauses, and render-verified integration tests.
+- [ ] [I107] Allow optional font size bounds for criss_cross renderer via --font-min/--font-max and explicit --subtitle-renderer criss_cross selection.
+- [x] [I107] Resolved criss_cross renderer selection with optional font-min/font-max bounds and integration tests.
+- [ ] [I108] Make punctuation removal the default across renderers with an explicit keep-punctuation override.
+- [x] [I108] Resolved default punctuation removal with keep-punctuation override across renderers.
+- [ ] [B314] Allow RSVP windows longer than max per-word timing by leaving idle slack instead of failing.
+- [x] [B314] Resolved RSVP long-window handling by capping per-word timing and allowing trailing idle frames, with integration coverage.
