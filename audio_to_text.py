@@ -41,6 +41,7 @@ INPUT_AUDIO_CODE = "audio_to_text.input.audio_file"
 INPUT_TEXT_CODE = "audio_to_text.input.text_file"
 OUTPUT_SRT_CODE = "audio_to_text.output.srt_file"
 INVALID_CONFIG_CODE = "audio_to_text.input.invalid_config"
+INVALID_LANGUAGE_CODE = "audio_to_text.input.invalid_language"
 ALIGN_MODEL_CODE = "audio_to_text.align.model"
 ALIGNMENT_CODE = "audio_to_text.align.failed"
 ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
@@ -53,6 +54,46 @@ DEVICE_LABELS = {
     "cuda": "CUDA",
 }
 SUPPORTED_DEVICES = set(DEVICE_LABELS.keys())
+SUPPORTED_ALIGNMENT_LANGUAGES = (
+    ("en", "English"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("es", "Spanish"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("zh", "Chinese"),
+    ("nl", "Dutch"),
+    ("uk", "Ukrainian"),
+    ("pt", "Portuguese"),
+    ("ar", "Arabic"),
+    ("cs", "Czech"),
+    ("ru", "Russian"),
+    ("pl", "Polish"),
+    ("hu", "Hungarian"),
+    ("fi", "Finnish"),
+    ("fa", "Persian"),
+    ("el", "Greek"),
+    ("tr", "Turkish"),
+    ("da", "Danish"),
+    ("he", "Hebrew"),
+    ("vi", "Vietnamese"),
+    ("ko", "Korean"),
+    ("ur", "Urdu"),
+    ("te", "Telugu"),
+    ("hi", "Hindi"),
+    ("ca", "Catalan"),
+    ("ml", "Malayalam"),
+    ("no", "Norwegian Bokmal"),
+    ("nn", "Norwegian Nynorsk"),
+    ("sk", "Slovak"),
+    ("sl", "Slovenian"),
+    ("hr", "Croatian"),
+    ("ro", "Romanian"),
+    ("eu", "Basque"),
+    ("gl", "Galician"),
+    ("ka", "Georgian"),
+)
+SUPPORTED_LANGUAGE_CODES = {code for code, _ in SUPPORTED_ALIGNMENT_LANGUAGES}
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 7860
 MAX_PORT = 65535
@@ -103,7 +144,6 @@ class AlignmentRequest:
     output_srt: str | None
     language: str
     device: str
-    align_model: str | None
     ui_host: str
     ui_port: int
 
@@ -111,6 +151,10 @@ class AlignmentRequest:
         if not self.language.strip():
             raise AlignmentValidationError(
                 INVALID_CONFIG_CODE, "language must be non-empty"
+            )
+        if self.language not in SUPPORTED_LANGUAGE_CODES:
+            raise AlignmentValidationError(
+                INVALID_LANGUAGE_CODE, f"unsupported language: {self.language!r}"
             )
         if self.device not in SUPPORTED_DEVICES:
             raise AlignmentValidationError(
@@ -174,7 +218,6 @@ class UiDefaults:
 
     language: str
     device: str
-    align_model: str | None
 
 
 @dataclass(frozen=True)
@@ -334,6 +377,18 @@ def normalize_device_value(raw_value: str, default_device: str) -> str:
     return normalized
 
 
+def normalize_language_value(raw_value: str, default_language: str) -> str:
+    """Normalize a language string for UI usage."""
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return default_language
+    if normalized not in SUPPORTED_LANGUAGE_CODES:
+        raise AlignmentValidationError(
+            INVALID_LANGUAGE_CODE, f"unsupported language: {normalized!r}"
+        )
+    return normalized
+
+
 def normalize_form_value(raw_value: object, default_value: str) -> str:
     """Normalize a form value into a string."""
     if raw_value is None:
@@ -356,7 +411,6 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
     parser.add_argument("--output-srt", default=None)
     parser.add_argument("--language", default="en")
     parser.add_argument("--device", default=DEVICE_AUTO)
-    parser.add_argument("--align-model", default=None)
     parsed = parser.parse_args(argv)
 
     mode = RequestMode.UI if parsed.ui else RequestMode.CLI
@@ -383,21 +437,19 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
         output_srt=output_srt,
         language=language_value,
         device=device_value,
-        align_model=parsed.align_model,
         ui_host=str(parsed.ui_host),
         ui_port=int(parsed.ui_port),
     )
 
 
 def load_alignment_model(
-    language: str, device: str, model_name: str | None
+    language: str, device: str
 ) -> tuple[object, dict[str, object]]:
     """Load the alignment model and metadata."""
     try:
         return whisperx.load_align_model(
             language_code=language,
             device=device,
-            model_name=model_name,
         )
     except Exception as exc:
         raise AlignmentPipelineError(
@@ -423,16 +475,13 @@ def align_words(
     transcript_text: str,
     language: str,
     device: str,
-    align_model_name: str | None,
 ) -> tuple[AlignedWord, ...]:
     """Align transcript text to the audio and return word timings."""
     audio = whisperx.load_audio(audio_path)
     audio_duration = float(len(audio)) / float(whisperx.audio.SAMPLE_RATE)
     segments = [{"start": 0.0, "end": audio_duration, "text": transcript_text}]
 
-    align_model, metadata = load_alignment_model(
-        language, device, align_model_name
-    )
+    align_model, metadata = load_alignment_model(language, device)
     try:
         result = whisperx.align(
             segments,
@@ -551,6 +600,13 @@ def build_ui_html(defaults: UiDefaults) -> str:
         selected = " selected" if device_key == defaults.device else ""
         device_options.append(
             f'<option value="{escape(device_key)}"{selected}>{escape(label)}</option>'
+        )
+    language_options = []
+    for language_code, language_label in SUPPORTED_ALIGNMENT_LANGUAGES:
+        selected = " selected" if language_code == defaults.language else ""
+        label_text = f"{language_label} ({language_code})"
+        language_options.append(
+            f'<option value="{escape(language_code)}"{selected}>{escape(label_text)}</option>'
         )
     template = Template(
         """<!doctype html>
@@ -823,11 +879,9 @@ def build_ui_html(defaults: UiDefaults) -> str:
       <div class="options">
         <label class="option">
           <span>Language</span>
-          <input id="language" type="text" value="$language_value" placeholder="en">
-        </label>
-        <label class="option">
-          <span>Alignment model (optional)</span>
-          <input id="align-model" type="text" value="$align_model_value" placeholder="auto">
+          <select id="language">
+            $language_options
+          </select>
         </label>
         <label class="option">
           <span>Device</span>
@@ -863,7 +917,6 @@ def build_ui_html(defaults: UiDefaults) -> str:
     const downloadLink = document.getElementById("download-link");
     const errorLine = document.getElementById("error-line");
     const languageInput = document.getElementById("language");
-    const alignModelInput = document.getElementById("align-model");
     const deviceSelect = document.getElementById("device");
     const progressBar = document.querySelector(".progress-bar");
     let audioFile = null;
@@ -940,7 +993,6 @@ def build_ui_html(defaults: UiDefaults) -> str:
       formData.append("audio", audioFile, audioFile.name);
       formData.append("text", textFile, textFile.name);
       formData.append("language", languageInput.value.trim() || "en");
-      formData.append("align_model", alignModelInput.value.trim());
       formData.append("device", deviceSelect.value);
       let response = await fetch("/api/jobs", { method: "POST", body: formData });
       let payload = await response.json();
@@ -991,8 +1043,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
 """
     )
     return template.substitute(
-        language_value=escape(defaults.language),
-        align_model_value=escape(defaults.align_model or ""),
+        language_options="\n            ".join(language_options),
         device_options="\n            ".join(device_options),
     )
 
@@ -1002,7 +1053,6 @@ def run_ui_server(request: AlignmentRequest) -> int:
     defaults = UiDefaults(
         language=request.language,
         device=request.device,
-        align_model=request.align_model,
     )
     root_dir = Path(tempfile.mkdtemp(prefix="audio_to_text_ui_"))
     job_store = JobStore(root_dir=root_dir)
@@ -1177,21 +1227,10 @@ def build_ui_handler(
             language_raw = normalize_form_value(
                 form.getvalue("language", defaults.language), defaults.language
             )
-            language_value = language_raw.strip() or defaults.language.strip()
-            if not language_value:
-                store.update_job(
-                    job.job_id, JobStatus.FAILED, "language must be non-empty"
-                )
-                self.send_error_response(
-                    HTTPStatus.BAD_REQUEST, "language must be non-empty"
-                )
-                return
-            align_model_raw = normalize_form_value(
-                form.getvalue("align_model", defaults.align_model or ""),
-                defaults.align_model or "",
-            )
-            align_model_value = align_model_raw.strip() or None
             try:
+                language_value = normalize_language_value(
+                    language_raw, defaults.language
+                )
                 device_value = normalize_device_value(
                     normalize_form_value(
                         form.getvalue("device", defaults.device), defaults.device
@@ -1212,7 +1251,6 @@ def build_ui_handler(
                 str(output_path),
                 language_value,
                 device_value,
-                align_model_value,
             )
             self.send_json(HTTPStatus.OK, {"job_id": job.job_id})
 
@@ -1227,7 +1265,6 @@ def run_alignment_job(
     output_path: str,
     language: str,
     device: str,
-    align_model: str | None,
 ) -> None:
     """Process a background alignment job."""
     store.update_job(
@@ -1266,7 +1303,6 @@ def run_alignment_job(
             transcript_text,
             language,
             resolved_device,
-            align_model,
         )
         store.update_job(
             job_id,
@@ -1330,7 +1366,6 @@ def main() -> int:
             transcript_text,
             request.language,
             resolved_device,
-            request.align_model,
         )
         srt_content = build_srt(words)
         write_srt_file(request.output_srt or "", srt_content)

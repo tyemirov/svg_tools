@@ -186,6 +186,8 @@ proceed
 - [x] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download. Resolved with built-in UI server, background queue, and SRT download endpoint plus docs.
 - [ ] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status.
 - [x] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status. Resolved with progress updates in job tracking and UI progress bar rendering.
+- [ ] [I117] Restrict audio_to_text language selection to supported alignment languages (dropdown only), remove custom model input, and avoid auto-detect.
+- [x] [I117] Restrict audio_to_text language selection to supported alignment languages (dropdown only), remove custom model input, and avoid auto-detect. Resolved with CLI/UI language validation, dropdown options, and docs/tests updates.
 
 ## Tooling Baseline (I114)
 - `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).

@@ -72,6 +72,35 @@ def test_audio_to_text_missing_text(tmp_path: Path) -> None:
     assert "audio_to_text.input.text_file" in result.stderr
 
 
+def test_audio_to_text_invalid_language(tmp_path: Path) -> None:
+    """Fail when an unsupported language is requested."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "audio_to_text.py"
+
+    audio_path = tmp_path / "audio.wav"
+    write_wav(audio_path, 0.2)
+
+    text_path = tmp_path / "input.txt"
+    text_path.write_text("hello world", encoding="utf-8")
+
+    args = [
+        str(script_path),
+        "--input-audio",
+        str(audio_path),
+        "--input-text",
+        str(text_path),
+        "--language",
+        "xx",
+        "--device",
+        "cpu",
+    ]
+
+    result = run_audio_to_text(args, repo_root)
+
+    assert result.returncode != 0
+    assert "audio_to_text.input.invalid_language" in result.stderr
+
+
 def test_audio_to_text_srt_sanitizes_empty_text(tmp_path: Path) -> None:
     """Fail when SRT input contains only timestamps after sanitization."""
     repo_root = Path(__file__).resolve().parents[1]

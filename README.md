@@ -262,8 +262,7 @@ Force-align audio or video to a provided transcript and emit an SRT with word-le
     --input-text <PATH> \
     [--output-srt <PATH.srt>] \
     [--language <CODE>] \
-    [--device <auto|cpu|cuda>] \
-    [--align-model <HF_MODEL_NAME>]
+    [--device <auto|cpu|cuda>]
 ```
 
 **UI usage:**
@@ -273,6 +272,8 @@ Force-align audio or video to a provided transcript and emit an SRT with word-le
 ```
 
 The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
+
+**Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
 
 ---
 
