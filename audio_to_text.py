@@ -30,6 +30,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
+from types import ModuleType
 from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
@@ -46,6 +47,7 @@ ALIGN_MODEL_CODE = "audio_to_text.align.model"
 ALIGNMENT_CODE = "audio_to_text.align.failed"
 ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
 DEVICE_UNAVAILABLE_CODE = "audio_to_text.device.unavailable"
+TORCH_VERSION_CODE = "audio_to_text.dependency.torch_version"
 INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
@@ -97,9 +99,12 @@ SUPPORTED_LANGUAGE_CODES = {code for code, _ in SUPPORTED_ALIGNMENT_LANGUAGES}
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 7860
 MAX_PORT = 65535
+TORCH_MIN_VERSION = (2, 6)
+TORCH_MIN_VERSION_TEXT = "2.6"
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}$"
 )
+TORCH_VERSION_PATTERN = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)")
 
 
 class RequestMode(str, Enum):
@@ -389,6 +394,43 @@ def normalize_language_value(raw_value: str, default_language: str) -> str:
     return normalized
 
 
+def parse_torch_version(version: str) -> tuple[int, int] | None:
+    """Parse the major and minor torch version."""
+    match = TORCH_VERSION_PATTERN.match(version.strip())
+    if match is None:
+        return None
+    return int(match.group("major")), int(match.group("minor"))
+
+
+def ensure_torch_version(torch_module: ModuleType, language: str) -> None:
+    """Ensure torch meets the minimum supported version for HF .bin weights."""
+    version = str(getattr(torch_module, "__version__", "")).strip()
+    parsed = parse_torch_version(version)
+    if parsed is None:
+        raise AlignmentPipelineError(
+            TORCH_VERSION_CODE, f"torch version is invalid: {version!r}"
+        )
+    if parsed < TORCH_MIN_VERSION:
+        raise AlignmentPipelineError(
+            TORCH_VERSION_CODE,
+            (
+                f"torch >= {TORCH_MIN_VERSION_TEXT} is required for "
+                f"{language!r} alignment models (installed: {version})"
+            ),
+        )
+
+
+def load_torch_module() -> ModuleType:
+    """Import torch."""
+    try:
+        import torch
+    except Exception as exc:
+        raise AlignmentPipelineError(
+            DEVICE_UNAVAILABLE_CODE, f"torch is unavailable: {exc}"
+        ) from exc
+    return torch
+
+
 def normalize_form_value(raw_value: object, default_value: str) -> str:
     """Normalize a form value into a string."""
     if raw_value is None:
@@ -398,6 +440,18 @@ def normalize_form_value(raw_value: object, default_value: str) -> str:
             return default_value
         return str(raw_value[0])
     return str(raw_value)
+
+
+def load_cgi_module() -> ModuleType:
+    """Import cgi without emitting deprecation warnings."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", category=DeprecationWarning, module="cgi"
+        )
+        import cgi
+    return cgi
 
 
 def parse_args(argv: Sequence[str]) -> AlignmentRequest:
@@ -446,6 +500,8 @@ def load_alignment_model(
     language: str, device: str
 ) -> tuple[object, dict[str, object]]:
     """Load the alignment model and metadata."""
+    torch_module = load_torch_module()
+    ensure_torch_version(torch_module, language)
     try:
         return whisperx.load_align_model(
             language_code=language,
@@ -459,15 +515,10 @@ def load_alignment_model(
 
 def resolve_device(device_value: str) -> str:
     """Resolve auto device selection to a concrete device."""
+    torch_module = load_torch_module()
     if device_value != DEVICE_AUTO:
         return device_value
-    try:
-        import torch
-    except Exception as exc:
-        raise AlignmentPipelineError(
-            DEVICE_UNAVAILABLE_CODE, f"torch is unavailable: {exc}"
-        ) from exc
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return "cuda" if torch_module.cuda.is_available() else "cpu"
 
 
 def align_words(
@@ -1174,7 +1225,7 @@ def build_ui_handler(
 
         def handle_create_job(self) -> None:
             """Accept uploads and queue a background alignment job."""
-            import cgi
+            cgi = load_cgi_module()
 
             content_type = self.headers.get("Content-Type", "")
             if "multipart/form-data" not in content_type:
