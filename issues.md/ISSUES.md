@@ -166,3 +166,5 @@ proceed
 - [x] [I110] Resolved font-max clamping by aligning the computed minimum to the provided max and adding render_text_video integration coverage.
 - [ ] [B318] Align horizontal letter rendering to a shared baseline to avoid wacky typography.
 - [x] [B318] Resolved baseline alignment by anchoring per-letter bboxes to the baseline and positioning horizontal letters using the baseline in render_text_video.
+- [ ] [B319] Add integration coverage for mixed-script baseline alignment (Latin + Cyrillic).
+- [x] [B319] Resolved baseline alignment coverage with mixed-script render verification and test dependency updates.

@@ -11,12 +11,15 @@ import zlib
 from pathlib import Path
 from typing import List
 
+from PIL import Image, ImageDraw, ImageFont
+
 BYTES_PER_PIXEL = 4
 ALPHA_THRESHOLD = 10
 TEMPLATE_MATCH_RATIO = 0.98
 FIRST_LETTER_MATCH_RATIO = 0.3
 ORDER_MATCH_RATIO = 0.3
 RSVP_MATCH_RATIO = 0.3
+BASELINE_TOLERANCE = 1
 DIRECTION_SEEDS = {
     "L2R": 2,
     "R2L": 1,
@@ -99,6 +102,18 @@ def probe_video_stream(video_path: Path) -> dict[str, str]:
         "codec_name": stream.get("codec_name", ""),
         "pix_fmt": stream.get("pix_fmt", ""),
     }
+
+
+def baseline_offset(font_path: Path, font_size: int, character: str) -> int:
+    """Return the baseline offset for a glyph bounding box."""
+    font = ImageFont.truetype(
+        str(font_path), size=font_size, layout_engine=ImageFont.Layout.BASIC
+    )
+    draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    _, top, _, _ = draw.textbbox(
+        (0, 0), character, font=font, stroke_width=0, anchor="ls"
+    )
+    return -int(top)
 
 
 def alpha_bbox(frame_bytes: bytes, width: int, height: int) -> tuple[int, int, int, int]:
@@ -768,6 +783,117 @@ def test_b2t_word_is_natural_and_complete(tmp_path: Path) -> None:
 
     y_positions = [best_positions[letter][0] for letter in word_text]
     assert y_positions == sorted(y_positions)
+
+
+def test_horizontal_baseline_alignment_mixed_scripts(tmp_path: Path) -> None:
+    """Ensure mixed-script letters share a baseline in horizontal motion."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    source_font = get_test_fonts_dir(repo_root) / "NotoSans-Bold.ttf"
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    shutil.copy(source_font, fonts_dir / source_font.name)
+
+    width = 360
+    height = 200
+    duration_seconds = "1.0"
+    fps = "6"
+    font_size = 72
+    word_text = "ltрф"
+    seed = str(DIRECTION_SEEDS["L2R"])
+
+    def render_word(text_value: str, output_name: str) -> Path:
+        input_path = tmp_path / f"{output_name}.txt"
+        input_path.write_text(text_value, encoding="utf-8")
+        output_path = tmp_path / f"{output_name}.mov"
+        args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds=duration_seconds,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        args.extend(
+            [
+                "--direction-seed",
+                seed,
+                "--subtitle-renderer",
+                "criss_cross",
+                "--font-min",
+                str(font_size),
+                "--font-max",
+                str(font_size),
+            ]
+        )
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
+        return output_path
+
+    total_frames = int(round(float(duration_seconds) * float(fps)))
+    fps_value = float(fps)
+    word_path = render_word(word_text, "word-mixed")
+
+    templates = {}
+    offsets = {}
+    for letter in word_text:
+        letter_path = render_word(letter, f"letter-{letter}-mixed")
+        templates[letter] = template_from_first_visible_frame(
+            letter_path,
+            total_frames,
+            fps_value,
+            width,
+            height,
+        )
+        offsets[letter] = baseline_offset(source_font, font_size, letter)
+
+    word_frames: list[bytes | None] = []
+    frame_bboxes: list[tuple[int, int, int, int] | None] = []
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(word_path, frame_index / fps_value)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            word_frames.append(None)
+            frame_bboxes.append(None)
+            continue
+        word_frames.append(frame_bytes)
+        frame_bboxes.append(
+            alpha_bbox(frame_bytes, width, height)
+            if frame_has_alpha(frame_bytes, width, height)
+            else None
+        )
+
+    baseline_positions = None
+    for frame_index, frame_bytes in enumerate(word_frames):
+        if frame_bytes is None:
+            continue
+        search_bbox = frame_bboxes[frame_index]
+        if search_bbox is None:
+            continue
+        baselines = {}
+        for letter, (template_bytes, template_width, template_height) in templates.items():
+            ratio, _, match_y = best_template_match_location(
+                frame_bytes,
+                width,
+                height,
+                template_bytes,
+                template_width,
+                template_height,
+                search_bbox,
+            )
+            if ratio < ORDER_MATCH_RATIO:
+                baselines = {}
+                break
+            baselines[letter] = match_y + offsets[letter]
+        if baselines:
+            baseline_positions = baselines
+            break
+
+    assert baseline_positions is not None
+    min_baseline = min(baseline_positions.values())
+    max_baseline = max(baseline_positions.values())
+    assert max_baseline - min_baseline <= BASELINE_TOLERANCE
 
 
 def test_rsvp_orp_anchor_is_stable(tmp_path: Path) -> None:
