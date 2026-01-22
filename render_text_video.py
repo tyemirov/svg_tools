@@ -375,7 +375,7 @@ def render_letter_image(
     letter_image = Image.new("RGBA", (letter_width, letter_height), (0, 0, 0, 0))
     letter_draw = ImageDraw.Draw(letter_image)
     letter_draw.text(
-        (-left, -top), character, font=font, fill=color_rgba, anchor="lb"
+        (-left, -top), character, font=font, fill=color_rgba, anchor="ls"
     )
     return letter_image
 
@@ -390,7 +390,7 @@ def build_letter_layout(
     letters: list[LetterToken] = []
     for character in word_text:
         letter_bbox = draw_context.textbbox(
-            (0, 0), character, font=font, stroke_width=0, anchor="lb"
+            (0, 0), character, font=font, stroke_width=0, anchor="ls"
         )
         letter_image = render_letter_image(
             character, font, color_rgba, letter_bbox
