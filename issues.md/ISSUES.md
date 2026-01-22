@@ -178,3 +178,4 @@ proceed
 ## Improvements Addendum (200–299)
 
 - [x] [I112] Allow render_text_video to merge a background (image or color) with audio only, without requiring input text. Resolved with background-only render path and integration coverage.
+- [x] [I113] Add SBV subtitle support for render_text_video input text files. Resolved with SBV parsing, detection, docs, and integration tests.

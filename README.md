@@ -225,7 +225,7 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 
 * Input text must be valid UTF-8 and is split on whitespace.
 * When `--input-text-file` is omitted, no text is rendered; the output is the background with optional audio.
-* `.srt` input files are parsed as subtitle windows; words render only inside each time range.
+* `.srt` and `.sbv` input files are parsed as subtitle windows; words render only inside each time range.
 * Provide either `--background-image` or `--width`/`--height` (image derives dimensions).
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
@@ -233,16 +233,16 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * `--remove-punctuation` is accepted for compatibility but matches the default behavior.
 * RSVP punctuation pauses only apply when punctuation is preserved.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
-* `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT input (single word at a time with ORP anchoring).
-* RSVP mode requires SRT timing and does not use motion directions or per-word random sizing.
+* `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT/SBV input (single word at a time with ORP anchoring).
+* RSVP mode requires subtitle timing and does not use motion directions or per-word random sizing.
 * `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`; if only one bound is provided, the other bound is clamped to it.
 * `--background` applies only when no background image is used.
 * ProRes output uses adaptive quantization plus 8-bit alpha to reduce file sizes on large frames.
 * Transparent output (no background image and `--background transparent`) uses ProRes 4444 with alpha; any opaque background uses H.264 without alpha for better compression.
 * Opaque output uses yuv420p and requires even frame dimensions (odd sizes are rejected).
-* `--audio-track` muxes audio and can supply duration; if no `--duration-seconds` is provided, duration is derived from the audio track and/or SRT timing (longest wins).
+* `--audio-track` muxes audio and can supply duration; if no `--duration-seconds` is provided, duration is derived from the audio track and/or subtitle timing (longest wins).
 * When `--duration-seconds` is provided with audio, the output duration is forced and audio is trimmed or padded.
-* `--duration-seconds` is required when no audio track and no SRT timing are provided.
+* `--duration-seconds` is required when no audio track and no subtitle timing are provided.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
 * Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for L2R/T2B so the first letter leads the motion, and vertical directions also add staggered offsets.
 * `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, `letter_offsets`, `letter_bands`, and `letter_band_sizes` (band offsets centered on the motion axis), then exits without rendering.
