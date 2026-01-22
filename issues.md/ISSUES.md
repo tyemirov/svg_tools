@@ -204,3 +204,5 @@ proceed
 - [x] [B322] Prevent audio_to_text UI DeprecationWarning noise from cgi and guard alignment against unsupported torch versions with a clear error. Resolved with cgi import warning suppression, torch version guard, and docs update.
 - [ ] [B323] Fix audio_to_text HF alignment model load failures on Intel macOS by using safetensors-backed defaults (Russian) and conditional torch version checks.
 - [x] [B323] Fix audio_to_text HF alignment model load failures on Intel macOS by using safetensors-backed defaults (Russian) and conditional torch version checks. Resolved with RU safetensors override, conditional torch>=2.6 enforcement, and docs update.
+- [ ] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import.
+- [x] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import. Resolved with lazy whisperx import and torchaudio AudioMetaData patching.

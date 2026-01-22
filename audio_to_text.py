@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import math
@@ -35,7 +36,6 @@ from types import ModuleType
 from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
-import whisperx
 
 LOGGER = logging.getLogger("audio_to_text")
 
@@ -436,6 +436,45 @@ def load_torch_module() -> ModuleType:
     return torch
 
 
+def ensure_torchaudio_metadata() -> None:
+    """Ensure torchaudio exposes AudioMetaData for pyannote imports."""
+    try:
+        import torchaudio
+    except Exception as exc:
+        raise AlignmentPipelineError(
+            DEVICE_UNAVAILABLE_CODE, f"torchaudio is unavailable: {exc}"
+        ) from exc
+    if hasattr(torchaudio, "AudioMetaData"):
+        return
+    audio_metadata_type = None
+    for module_name in ("torchaudio.backend.common", "torchaudio._backend.common"):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        audio_metadata_type = getattr(module, "AudioMetaData", None)
+        if audio_metadata_type is not None:
+            break
+    if audio_metadata_type is None:
+        raise AlignmentPipelineError(
+            ALIGNMENT_CODE,
+            "torchaudio is missing AudioMetaData; upgrade torchaudio",
+        )
+    setattr(torchaudio, "AudioMetaData", audio_metadata_type)
+
+
+def load_whisperx_module() -> ModuleType:
+    """Import whisperx after verifying torchaudio metadata."""
+    ensure_torchaudio_metadata()
+    try:
+        import whisperx
+    except Exception as exc:
+        raise AlignmentPipelineError(
+            ALIGNMENT_CODE, f"whisperx import failed: {exc}"
+        ) from exc
+    return whisperx
+
+
 def normalize_form_value(raw_value: object, default_value: str) -> str:
     """Normalize a form value into a string."""
     if raw_value is None:
@@ -505,6 +544,7 @@ def load_alignment_model(
     language: str, device: str
 ) -> tuple[object, dict[str, object]]:
     """Load the alignment model and metadata."""
+    whisperx = load_whisperx_module()
     model_name = ALIGNMENT_MODEL_OVERRIDES.get(language)
     if (
         language not in TORCHAUDIO_ALIGNMENT_LANGUAGES
@@ -539,6 +579,7 @@ def align_words(
     device: str,
 ) -> tuple[AlignedWord, ...]:
     """Align transcript text to the audio and return word timings."""
+    whisperx = load_whisperx_module()
     audio = whisperx.load_audio(audio_path)
     audio_duration = float(len(audio)) / float(whisperx.audio.SAMPLE_RATE)
     segments = [{"start": 0.0, "end": audio_duration, "text": transcript_text}]
