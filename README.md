@@ -234,7 +234,7 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * RSVP punctuation pauses only apply when punctuation is preserved.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT/SBV input (single word at a time with ORP anchoring).
-* RSVP mode requires subtitle timing and does not use motion directions or per-word random sizing.
+* RSVP mode requires subtitle timing and does not use motion directions or per-word random sizing; when a cue is too short, per-word timing is compressed and cues may drift slightly to fit.
 * `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`; if only one bound is provided, the other bound is clamped to it.
 * `--background` applies only when no background image is used.
 * ProRes output uses adaptive quantization plus 8-bit alpha to reduce file sizes on large frames.
