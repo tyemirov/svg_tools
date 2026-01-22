@@ -374,7 +374,9 @@ def render_letter_image(
     letter_height = max(1, bottom - top)
     letter_image = Image.new("RGBA", (letter_width, letter_height), (0, 0, 0, 0))
     letter_draw = ImageDraw.Draw(letter_image)
-    letter_draw.text((-left, -top), character, font=font, fill=color_rgba)
+    letter_draw.text(
+        (-left, -top), character, font=font, fill=color_rgba, anchor="lb"
+    )
     return letter_image
 
 
@@ -388,7 +390,7 @@ def build_letter_layout(
     letters: list[LetterToken] = []
     for character in word_text:
         letter_bbox = draw_context.textbbox(
-            (0, 0), character, font=font, stroke_width=0
+            (0, 0), character, font=font, stroke_width=0, anchor="lb"
         )
         letter_image = render_letter_image(
             character, font, color_rgba, letter_bbox
@@ -604,6 +606,7 @@ def compute_letter_position(
     frame_height: int,
     letter_bbox: Tuple[int, int, int, int],
     band_position: int,
+    baseline_y: float,
 ) -> Tuple[int, int]:
     """Compute a letter position given a motion direction and progress."""
     left, top, right, bottom = letter_bbox
@@ -619,9 +622,8 @@ def compute_letter_position(
         center_x = (
             start_center_x + (end_center_x - start_center_x) * clamped_progress
         ) + band_position
-        center_y = frame_height / 2.0
         x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(center_y - center_offset_y))
+        y_value = int(round(baseline_y + top))
         return (x_value, y_value)
 
     if direction == "R2L":
@@ -630,9 +632,8 @@ def compute_letter_position(
         center_x = (
             start_center_x + (end_center_x - start_center_x) * clamped_progress
         ) + band_position
-        center_y = frame_height / 2.0
         x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(center_y - center_offset_y))
+        y_value = int(round(baseline_y + top))
         return (x_value, y_value)
 
     if direction == "T2B":
@@ -669,6 +670,20 @@ def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ..
         normalized = index_value / float(max(1, letter_count - 1))
         offsets.append((0.5 - normalized) * LETTER_STAGGER_RATIO)
     return tuple(offsets)
+
+
+def compute_baseline_y(font: ImageFont.FreeTypeFont, frame_height: int) -> float:
+    """Compute a baseline Y position using font metrics."""
+    default_baseline = frame_height / 2.0
+    try:
+        ascent, descent = font.getmetrics()
+    except Exception:
+        return default_baseline
+    min_baseline = float(ascent)
+    max_baseline = float(frame_height - descent)
+    if min_baseline <= max_baseline:
+        return min(max(default_baseline, min_baseline), max_baseline)
+    return min_baseline
 
 
 def should_reverse_letter_order(direction: str) -> bool:
@@ -898,7 +913,12 @@ def align_letter_band_positions_to_entry(
         min_shift = max(min_shift, min_allowed - position)
         max_shift = min(max_shift, max_allowed - position)
     if min_shift <= max_shift:
-        shift = min(max(shift, min_shift), max_shift)
+        if not (min_shift <= shift <= max_shift) and direction in HORIZONTAL_DIRECTIONS:
+            shift = desired_edge - entry_edge
+        else:
+            shift = min(max(shift, min_shift), max_shift)
+    elif direction in HORIZONTAL_DIRECTIONS:
+        shift = desired_edge - entry_edge
     else:
         shift = 0.0
     return tuple(int(round(position + shift)) for position in band_positions)
@@ -1118,6 +1138,7 @@ def render_video(
     current_token: WordToken | None = None
     current_letter_offsets: Tuple[float, ...] = ()
     current_letter_bands: Tuple[int, ...] = ()
+    current_baseline_y = config.height / 2.0
 
     try:
         for frame_index in range(plan.total_frames):
@@ -1173,6 +1194,12 @@ def render_video(
                         config.width,
                         config.height,
                     )
+                    if direction in HORIZONTAL_DIRECTIONS:
+                        current_baseline_y = compute_baseline_y(
+                            current_token.style.font, config.height
+                        )
+                    else:
+                        current_baseline_y = config.height / 2.0
                 token = current_token
                 if token is None:
                     raise RenderPipelineError(
@@ -1195,6 +1222,7 @@ def render_video(
                         frame_height=config.height,
                         letter_bbox=letter.bbox,
                         band_position=current_letter_bands[letter_index],
+                        baseline_y=current_baseline_y,
                     )
                     frame_image.paste(letter.image, (pos_x, pos_y), letter.image)
 
