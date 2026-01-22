@@ -194,3 +194,5 @@ proceed
 
 - [ ] [B324] Fix render_text_video RSVP windows that are shorter than one frame to avoid "subtitle window has no frames" errors.
 - [x] [B324] Fix render_text_video RSVP windows that are shorter than one frame to avoid "subtitle window has no frames" errors. Resolved with non-empty window frame conversion and RSVP integration coverage.
+- [ ] [B321] Fix audio_to_text UI template placeholder escaping to avoid KeyError for jobId.
+- [x] [B321] Fix audio_to_text UI template placeholder escaping to avoid KeyError for jobId. Resolved with escaped template literals.

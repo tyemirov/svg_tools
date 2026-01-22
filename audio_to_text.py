@@ -955,7 +955,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
 
     async function pollStatus(jobId) {
       while (true) {
-        let response = await fetch(`/api/jobs/${jobId}`);
+        let response = await fetch(`/api/jobs/$${jobId}`);
         if (!response.ok) {
           setError("Failed to check job status.");
           break;
@@ -965,7 +965,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
         setProgress(progressValue);
         if (payload.status === "completed") {
           setStatus("Complete.", payload.message || "SRT is ready to download.");
-          downloadLink.href = `/api/jobs/${jobId}/srt`;
+          downloadLink.href = `/api/jobs/$${jobId}/srt`;
           downloadLink.classList.remove("hidden");
           break;
         }
