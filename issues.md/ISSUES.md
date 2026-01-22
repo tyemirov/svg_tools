@@ -179,3 +179,8 @@ proceed
 
 - [x] [I112] Allow render_text_video to merge a background (image or color) with audio only, without requiring input text. Resolved with background-only render path and integration coverage.
 - [x] [I113] Add SBV subtitle support for render_text_video input text files. Resolved with SBV parsing, detection, docs, and integration tests.
+- [x] [I114] Sanitize SRT input in audio_to_text by ignoring indices and timestamps before alignment. Resolved with SRT sanitization and integration coverage.
+- [x] [I114] Add audio_to_text CLI with --input-audio/--input-text to produce forced-alignment SRT output. Resolved with uv CLI support, forced-alignment SRT emission, and integration tests.
+
+## Tooling Baseline (I114)
+- `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).
