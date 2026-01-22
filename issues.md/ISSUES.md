@@ -162,3 +162,5 @@ proceed
 - [x] [B317] Resolved alpha MOV size by scaling ProRes quantization with frame size and using 8-bit alpha, plus ffmpeg capability checks.
 - [ ] [I109] Use non-alpha encoding when a background image or solid color is provided; reserve alpha output for transparent backgrounds.
 - [x] [I109] Resolved opaque output by switching to H.264 (libx264) when alpha is not needed and validating the codec in integration tests.
+- [ ] [I110] Allow `--font-max` alone to clamp the default minimum size for criss_cross rendering.
+- [x] [I110] Resolved font-max clamping by aligning the computed minimum to the provided max and adding render_text_video integration coverage.

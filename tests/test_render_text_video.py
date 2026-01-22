@@ -1107,6 +1107,42 @@ def test_font_bounds_apply_for_criss_cross(tmp_path: Path) -> None:
     assert all(40 <= size <= 50 for size in sizes)
 
 
+def test_font_max_clamps_default_min(tmp_path: Path) -> None:
+    """Clamp the default minimum when only font-max is provided."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    input_text = "alpha beta gamma"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(
+        [
+            "--subtitle-renderer",
+            "criss_cross",
+            "--font-max",
+            "20",
+            "--emit-directions",
+        ]
+    )
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    sizes = payload["font_sizes"]
+    assert sizes
+    assert all(size == 20 for size in sizes)
+
+
 def test_font_bounds_invalid_range_fails(tmp_path: Path) -> None:
     """Reject invalid font bounds where min exceeds max."""
     repo_root = Path(__file__).resolve().parents[1]

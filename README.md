@@ -233,7 +233,7 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT input (single word at a time with ORP anchoring).
 * RSVP mode requires SRT timing and does not use motion directions or per-word random sizing.
-* `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`.
+* `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`; if only one bound is provided, the other bound is clamped to it.
 * `--background` applies only when no background image is used.
 * ProRes output uses adaptive quantization plus 8-bit alpha to reduce file sizes on large frames.
 * Transparent output (no background image and `--background transparent`) uses ProRes 4444 with alpha; any opaque background uses H.264 without alpha for better compression.

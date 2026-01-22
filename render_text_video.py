@@ -1379,10 +1379,15 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
 
     alpha_mode = select_alpha_mode(background_rgba, background_image)
     min_font_size, max_font_size = compute_font_size_range(width, height)
-    if parsed.font_min is not None:
+    if parsed.font_min is not None and parsed.font_max is not None:
         min_font_size = parsed.font_min
-    if parsed.font_max is not None:
         max_font_size = parsed.font_max
+    elif parsed.font_min is not None:
+        min_font_size = parsed.font_min
+        max_font_size = max(max_font_size, min_font_size)
+    elif parsed.font_max is not None:
+        max_font_size = parsed.font_max
+        min_font_size = min(min_font_size, max_font_size)
     if min_font_size > max_font_size:
         raise RenderValidationError(
             INVALID_CONFIG_CODE, "font-min exceeds font-max"
