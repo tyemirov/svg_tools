@@ -45,6 +45,7 @@ ALIGN_MODEL_CODE = "audio_to_text.align.model"
 ALIGNMENT_CODE = "audio_to_text.align.failed"
 ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
 DEVICE_UNAVAILABLE_CODE = "audio_to_text.device.unavailable"
+INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
     DEVICE_AUTO: "Auto (GPU if available)",
@@ -184,6 +185,14 @@ class AlignmentJob:
     status: JobStatus
     message: str | None
     output_srt: str | None
+    progress: float
+
+    def __post_init__(self) -> None:
+        if self.progress < 0.0 or self.progress > 1.0:
+            raise AlignmentPipelineError(
+                INVALID_PROGRESS_CODE,
+                f"progress must be between 0 and 1: {self.progress}",
+            )
 
 
 @dataclass
@@ -197,7 +206,7 @@ class JobStore:
     def create_job(self) -> AlignmentJob:
         """Create a new queued job."""
         job_id = uuid.uuid4().hex
-        job = AlignmentJob(job_id, JobStatus.QUEUED, None, None)
+        job = AlignmentJob(job_id, JobStatus.QUEUED, None, None, 0.0)
         with self.lock:
             self.jobs[job_id] = job
         return job
@@ -213,9 +222,15 @@ class JobStore:
         status: JobStatus,
         message: str | None = None,
         output_srt: str | None = None,
+        progress: float | None = None,
     ) -> AlignmentJob:
         """Update a job's status."""
-        job = AlignmentJob(job_id, status, message, output_srt)
+        with self.lock:
+            current = self.jobs.get(job_id)
+        progress_value = progress
+        if progress_value is None:
+            progress_value = current.progress if current else 0.0
+        job = AlignmentJob(job_id, status, message, output_srt, progress_value)
         with self.lock:
             self.jobs[job_id] = job
         return job
@@ -715,6 +730,23 @@ def build_ui_html(defaults: UiDefaults) -> str:
       transform: none;
       box-shadow: none;
     }
+    .progress {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(29, 27, 25, 0.08);
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, rgba(43, 122, 120, 0.2), rgba(43, 122, 120, 0.7), rgba(43, 122, 120, 0.2));
+      background-size: 200% 100%;
+      transition: width 0.3s ease;
+      opacity: 0.6;
+    }
+    body.running .progress-bar {
+      animation: shimmer 1.6s linear infinite;
+    }
     .status {
       display: grid;
       gap: 6px;
@@ -748,6 +780,10 @@ def build_ui_html(defaults: UiDefaults) -> str:
     }
     .hidden {
       display: none;
+    }
+    @keyframes shimmer {
+      0% { background-position: 0% 0; }
+      100% { background-position: 200% 0; }
     }
     @keyframes floatIn {
       0% { opacity: 0; transform: translateY(12px); }
@@ -802,6 +838,9 @@ def build_ui_html(defaults: UiDefaults) -> str:
       </div>
       <div class="actions">
         <button id="run-button" class="run-button">Align and Build SRT</button>
+        <div class="progress">
+          <div class="progress-bar"></div>
+        </div>
       </div>
       <div class="status">
         <div class="status-main" id="status-line">Ready to align.</div>
@@ -826,6 +865,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
     const languageInput = document.getElementById("language");
     const alignModelInput = document.getElementById("align-model");
     const deviceSelect = document.getElementById("device");
+    const progressBar = document.querySelector(".progress-bar");
     let audioFile = null;
     let textFile = null;
     const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -843,6 +883,11 @@ def build_ui_html(defaults: UiDefaults) -> str:
     function clearError() {
       errorLine.classList.add("hidden");
       errorLine.textContent = "";
+    }
+
+    function setProgress(value) {
+      const clamped = Math.max(0, Math.min(1, value));
+      progressBar.style.width = Math.round(clamped * 100) + "%";
     }
 
     function markZone(zone, meta, file) {
@@ -883,11 +928,13 @@ def build_ui_html(defaults: UiDefaults) -> str:
     async function startJob() {
       clearError();
       downloadLink.classList.add("hidden");
+      setProgress(0);
       if (!audioFile || !textFile) {
         setError("Select both an audio file and a transcript file.");
         return;
       }
       runButton.disabled = true;
+      document.body.classList.add("running");
       setStatus("Queued.", "Uploading files and preparing alignment.");
       const formData = new FormData();
       formData.append("audio", audioFile, audioFile.name);
@@ -900,6 +947,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
       if (!response.ok) {
         setError(payload.error || "Failed to start alignment.");
         runButton.disabled = false;
+        document.body.classList.remove("running");
         return;
       }
       await pollStatus(payload.job_id);
@@ -913,6 +961,8 @@ def build_ui_html(defaults: UiDefaults) -> str:
           break;
         }
         let payload = await response.json();
+        const progressValue = typeof payload.progress === "number" ? payload.progress : 0;
+        setProgress(progressValue);
         if (payload.status === "completed") {
           setStatus("Complete.", payload.message || "SRT is ready to download.");
           downloadLink.href = `/api/jobs/${jobId}/srt`;
@@ -931,6 +981,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
         await delay(1000);
       }
       runButton.disabled = false;
+      document.body.classList.remove("running");
     }
 
     runButton.addEventListener("click", () => startJob());
@@ -1046,6 +1097,7 @@ def build_ui_handler(
                     "status": job.status.value,
                     "message": job.message,
                     "output_ready": bool(job.output_srt),
+                    "progress": job.progress,
                 },
             )
 
@@ -1182,6 +1234,7 @@ def run_alignment_job(
         job_id,
         JobStatus.RUNNING,
         message="Preparing input files",
+        progress=0.05,
     )
     try:
         ensure_audio_file_exists(audio_path)
@@ -1189,6 +1242,7 @@ def run_alignment_job(
             job_id,
             JobStatus.RUNNING,
             message="Reading transcript text",
+            progress=0.15,
         )
         transcript_text = normalize_transcript(
             read_utf8_text_strict(text_path),
@@ -1198,12 +1252,14 @@ def run_alignment_job(
             job_id,
             JobStatus.RUNNING,
             message="Resolving device",
+            progress=0.3,
         )
         resolved_device = resolve_device(device)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
             message="Aligning words to audio",
+            progress=0.45,
         )
         words = align_words(
             audio_path,
@@ -1216,12 +1272,14 @@ def run_alignment_job(
             job_id,
             JobStatus.RUNNING,
             message="Building subtitle output",
+            progress=0.85,
         )
         srt_content = build_srt(words)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
             message="Writing subtitle file",
+            progress=0.95,
         )
         write_srt_file(output_path, srt_content)
         store.update_job(
@@ -1229,24 +1287,28 @@ def run_alignment_job(
             JobStatus.COMPLETED,
             message="Complete",
             output_srt=output_path,
+            progress=1.0,
         )
     except AlignmentValidationError as exc:
         store.update_job(
             job_id,
             JobStatus.FAILED,
             f"{exc.code}: {exc}",
+            progress=1.0,
         )
     except AlignmentPipelineError as exc:
         store.update_job(
             job_id,
             JobStatus.FAILED,
             f"{exc.code}: {exc}",
+            progress=1.0,
         )
     except Exception as exc:
         store.update_job(
             job_id,
             JobStatus.FAILED,
             f"audio_to_text.unhandled_error: {str(exc).strip()}",
+            progress=1.0,
         )
 
 

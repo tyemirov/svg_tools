@@ -184,6 +184,8 @@ proceed
 - [x] [I114] Add audio_to_text CLI with --input-audio/--input-text to produce forced-alignment SRT output. Resolved with uv CLI support, forced-alignment SRT emission, and integration tests.
 - [ ] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download.
 - [x] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download. Resolved with built-in UI server, background queue, and SRT download endpoint plus docs.
+- [ ] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status.
+- [x] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status. Resolved with progress updates in job tracking and UI progress bar rendering.
 
 ## Tooling Baseline (I114)
 - `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).
