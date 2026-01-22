@@ -1419,6 +1419,62 @@ def test_background_image_conflicts_with_dimensions(tmp_path: Path) -> None:
     assert "render_text_video.input.invalid_config" in result.stderr
 
 
+def test_opaque_requires_even_dimensions(tmp_path: Path) -> None:
+    """Fail when opaque output is requested with odd dimensions."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    input_text = "alpha"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.6",
+        fps="6",
+        width=101,
+        height=100,
+    )
+    args.extend(["--background", "#000000"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
+
+
+def test_background_image_requires_even_dimensions(tmp_path: Path) -> None:
+    """Fail when background image dimensions are odd for opaque output."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    input_text = "alpha beta"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    background_path = tmp_path / "background.png"
+    write_png(background_path, 11, 12, (0, 0, 0, 255))
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="1.0",
+        fps="6",
+        include_dimensions=False,
+    )
+    args.extend(["--background-image", str(background_path)])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
+
+
 def test_requires_dimensions_without_background(tmp_path: Path) -> None:
     """Fail when no dimensions or background image are provided."""
     repo_root = Path(__file__).resolve().parents[1]

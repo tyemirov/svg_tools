@@ -1406,6 +1406,11 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         height = parsed.height
 
     alpha_mode = select_alpha_mode(background_rgba, background_image)
+    if alpha_mode == VideoAlphaMode.OPAQUE and (width % 2 or height % 2):
+        raise RenderValidationError(
+            INVALID_CONFIG_CODE,
+            "width and height must be even for opaque output",
+        )
     min_font_size, max_font_size = compute_font_size_range(width, height)
     if parsed.font_min is not None and parsed.font_max is not None:
         min_font_size = parsed.font_min

@@ -168,3 +168,5 @@ proceed
 - [x] [B318] Resolved baseline alignment by anchoring per-letter bboxes to the baseline and positioning horizontal letters using the baseline in render_text_video.
 - [ ] [B319] Add integration coverage for mixed-script baseline alignment (Latin + Cyrillic).
 - [x] [B319] Resolved baseline alignment coverage with mixed-script render verification and test dependency updates.
+- [ ] [B320] Validate even dimensions for opaque H.264 output to avoid runtime ffmpeg failures.
+- [x] [B320] Resolved even-dimension validation with CLI checks and integration tests for odd sizes.
