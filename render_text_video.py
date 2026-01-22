@@ -165,7 +165,7 @@ class RenderRequest:
     alpha_mode: VideoAlphaMode
     audio_track: str | None
     duration_override: bool
-    input_text: str
+    input_text: str | None
 
 
 @dataclass(frozen=True)
@@ -1239,6 +1239,64 @@ def emit_directions(
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
 
 
+def compute_total_frames(duration_seconds: float, fps: int) -> int:
+    """Compute total frames for a video duration."""
+    total_frames = int(round(duration_seconds * fps))
+    if total_frames <= 0:
+        raise RenderValidationError(
+            INVALID_CONFIG_CODE, "duration and fps produce zero frames"
+        )
+    return total_frames
+
+
+def render_background_video(
+    config: RenderConfig,
+    background_image: Image.Image | None,
+    alpha_mode: VideoAlphaMode,
+    audio_track: str | None,
+) -> None:
+    """Render a background-only video for the configured duration."""
+    ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
+    if not ffmpeg_process.stdin:
+        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
+
+    total_frames = compute_total_frames(config.duration_seconds, config.fps)
+    if background_image is None:
+        frame_image = Image.new(
+            "RGBA", (config.width, config.height), color=config.background_rgba
+        )
+    else:
+        frame_image = background_image
+    frame_bytes = frame_image.tobytes()
+
+    try:
+        for _ in range(total_frames):
+            ffmpeg_process.stdin.write(frame_bytes)
+
+        ffmpeg_process.stdin.close()
+        stderr_bytes = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else b""
+        return_code = ffmpeg_process.wait()
+
+        if return_code != 0:
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE,
+                f"ffmpeg failed with exit code {return_code}. {stderr_text}",
+            )
+
+    finally:
+        try:
+            if ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
+                ffmpeg_process.stdin.close()
+        except Exception:
+            pass
+        try:
+            if ffmpeg_process.poll() is None:
+                ffmpeg_process.kill()
+        except Exception:
+            pass
+
+
 def render_video(
     config: RenderConfig,
     plan: RenderPlan,
@@ -1463,7 +1521,7 @@ def render_rsvp_video(
 def parse_args(argv: Sequence[str]) -> RenderRequest:
     """Parse CLI arguments into a RenderRequest."""
     parser = argparse.ArgumentParser(prog="render_text_video.py", add_help=True)
-    parser.add_argument("--input-text-file", required=True)
+    parser.add_argument("--input-text-file", required=False)
     parser.add_argument("--output-video-file", default="video.mov")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
@@ -1489,15 +1547,39 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     remove_punctuation = not parsed.keep_punctuation
     background_rgba = parse_hex_color_to_rgba(parsed.background)
     background_image = None
-    input_text = read_utf8_text_strict(parsed.input_text_file)
-    is_srt = is_srt_input(parsed.input_text_file, input_text)
-    srt_duration = (
-        compute_srt_duration_seconds(input_text, remove_punctuation) if is_srt else None
-    )
+    input_text_file = parsed.input_text_file
+    input_text = None
+    is_srt = False
+    srt_duration = None
+    if input_text_file is not None:
+        input_text = read_utf8_text_strict(input_text_file)
+        is_srt = is_srt_input(input_text_file, input_text)
+        if is_srt:
+            srt_duration = compute_srt_duration_seconds(
+                input_text, remove_punctuation
+            )
     audio_track = parsed.audio_track
     audio_duration = (
         get_audio_duration_seconds(audio_track) if audio_track else None
     )
+
+    if input_text_file is None:
+        if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "rsvp_orp requires input-text-file"
+            )
+        if parsed.emit_directions:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "emit-directions requires input-text-file"
+            )
+        if parsed.direction_seed is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "direction-seed requires input-text-file"
+            )
+        if parsed.font_min is not None or parsed.font_max is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font-min/font-max require input-text-file"
+            )
 
     if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
         if parsed.direction_seed is not None:
@@ -1580,7 +1662,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         )
 
     config = RenderConfig(
-        input_text_file=parsed.input_text_file,
+        input_text_file=input_text_file,
         output_video_file=parsed.output_video_file,
         width=width,
         height=height,
@@ -1683,6 +1765,15 @@ def main() -> int:
 
     try:
         request = parse_args(sys.argv[1:])
+        if request.input_text is None:
+            validate_ffmpeg_capabilities(request.alpha_mode, request.audio_track)
+            render_background_video(
+                request.config,
+                request.background_image,
+                request.alpha_mode,
+                request.audio_track,
+            )
+            return 0
         plan = build_render_plan_from_input(
             request.config,
             request.remove_punctuation,

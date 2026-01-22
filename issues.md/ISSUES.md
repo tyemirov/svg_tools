@@ -174,3 +174,7 @@ proceed
 ## Features Addendum (100-199)
 
 - [x] [F101] Add audio track support in render_text_video with duration derived from audio/SRT (longest wins) and a duration override warning that trims/pads audio to the requested length. Resolved with audio muxing, ffprobe-derived duration, trim/pad warning, and integration tests.
+
+## Improvements Addendum (200–299)
+
+- [x] [I112] Allow render_text_video to merge a background (image or color) with audio only, without requiring input text. Resolved with background-only render path and integration coverage.

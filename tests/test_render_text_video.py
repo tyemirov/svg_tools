@@ -1544,6 +1544,41 @@ def test_requires_dimensions_without_background(tmp_path: Path) -> None:
     assert "render_text_video.input.invalid_config" in result.stderr
 
 
+def test_audio_only_background_without_text(tmp_path: Path) -> None:
+    """Render a background-only video when only audio is provided."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    audio_path = tmp_path / "audio.wav"
+    audio_duration = 0.6
+    write_wav(audio_path, audio_duration)
+
+    output_path = tmp_path / "out.mov"
+    args = [
+        str(script_path),
+        "--output-video-file",
+        str(output_path),
+        "--width",
+        "64",
+        "--height",
+        "64",
+        "--fps",
+        "10",
+        "--background",
+        "#000000",
+        "--fonts-dir",
+        str(fonts_dir),
+        "--audio-track",
+        str(audio_path),
+    ]
+
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    duration = probe_video_duration(output_path)
+    assert math.isclose(duration, audio_duration, abs_tol=0.05)
+
+
 def test_audio_track_sets_duration_without_override(tmp_path: Path) -> None:
     """Use audio duration when no explicit duration is provided."""
     repo_root = Path(__file__).resolve().parents[1]

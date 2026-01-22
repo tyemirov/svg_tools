@@ -47,7 +47,7 @@ class SubtitleRenderer(str, Enum):
 class RenderConfig:
     """Validated configuration for render_text_video."""
 
-    input_text_file: str
+    input_text_file: str | None
     output_video_file: str
     width: int
     height: int
@@ -61,6 +61,10 @@ class RenderConfig:
     font_size_max: int
 
     def __post_init__(self) -> None:
+        if self.input_text_file is not None and not self.input_text_file.strip():
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "input_text_file must be non-empty"
+            )
         if self.width <= 0 or self.height <= 0:
             raise RenderValidationError(
                 INVALID_CONFIG_CODE, "width and height must be positive"

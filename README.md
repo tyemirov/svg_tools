@@ -202,7 +202,7 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 
 ```shell
 ./render_text_video.py \
-    --input-text-file <PATH> \
+    [--input-text-file <PATH>] \
     --output-video-file <PATH.mov> \
     [--width <PIXELS>] \
     [--height <PIXELS>] \
@@ -224,6 +224,7 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 **Notes**
 
 * Input text must be valid UTF-8 and is split on whitespace.
+* When `--input-text-file` is omitted, no text is rendered; the output is the background with optional audio.
 * `.srt` input files are parsed as subtitle windows; words render only inside each time range.
 * Provide either `--background-image` or `--width`/`--height` (image derives dimensions).
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
