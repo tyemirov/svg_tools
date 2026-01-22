@@ -9,6 +9,51 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 
 ## Features (100-199)
 
+- [ ] [F100] RSVP_ORP subtitle renderer (eye-stationary speed reading). Add a new subtitle rendering mode enabled by: `--subtitle-renderer rsvp_orp`. All parameters are derived from input video and text.
+*Goal*
+Render one word at a time at a fixed screen position, horizontally shifted so the word’s ORP (Optimal Recognition Point) letter is always centered on the same X pixel. Burn subtitles into the video using the existing text overlay system.
+*Defaults (derived)*
+anchor_x = 0.50 * frame_width
+anchor_y = 0.80 * frame_height
+font_size_px = clamp(round(frame_height * 0.060), 28, 96)
+stroke_px = clamp(round(font_size_px * 0.10), 2, 10)
+margin_px = round(font_size_px * 0.60)
+Base text color: near-white; stroke: black
+ORP highlight color: slightly brighter than base
+*Input*
+Reuse existing subtitle input (SRT).
+Split each cue into word tokens; keep trailing punctuation attached (.,!?:;).
+*Timing (per cue)*
+Let cue_ms = end_ms - start_ms
+For each word: weight = max(1, len(word_core))
+Allocate durations proportional to weights
+Clamp per word: 80ms <= duration <= 700ms
+If token ends with punctuation, add +160ms pause by extending that word (shift following words within cue if needed; never overlap next cue)
+*ORP index*
+Let word_core exclude trailing punctuation.
+If len(word_core) <= 1: orp = 0
+Else: orp = max(0, floor(len(word_core) * 0.35) - 1)
+*ORP anchoring*
+Let:
+prefix = word_core[:orp]
+orp_char = word_core[orp]
+Measure with existing font metrics:
+prefix_w = text_width(prefix)
+orp_w = text_width(orp_char)
+*Compute:*
+x = anchor_x - prefix_w - round(orp_w / 2)
+Clamp x to [margin_px, frame_width - margin_px - text_width(full_token)]
+y = anchor_y
+*Rendering*
+For each word event:
+Draw full token at (x, y) in base style
+Draw orp_char again at (x + prefix_w, y) in ORP highlight color
+*Output constraints*
+One word visible at a time
+No timing overlaps
+ORP X position stable within ±2 px across words
+Burned-in subtitles; reuse existing overlay pipeline
+
 ## Improvements (200–299)
 
 - [x] [I100] Allow [text](../render_text_video.py) file to parse srt files with subtitles and timing, and distribute the words only through the timwindow allowed in subtitles. See example in [text](../data/inputs/captions.srt). Resolved with SRT parsing, timing-aware scheduling, and integration tests.
@@ -33,6 +78,9 @@ Each issue is formatted as `- [ ] [<ID>-<number>]`. When resolved it becomes -` 
 - [x] [B308] Add integration test confirming top-to-bottom words lead with the first letter (HARD example). Resolved with deterministic T2B band-order test.
 - [x] [B309] Add integration test confirming HARD leads in all four directions. Resolved with deterministic seed coverage for each direction.
 - [x] [B310] Fix left-to-right ordering so the first letter leads the motion (Cyrillic example "писать"). Resolved with L2R order flip and rendered-frame test.
+- [x] [B311] Reduce alpha output size (20GB/100s) while keeping fast rendering and alpha. Resolved with ProRes 4444 tuned quality and lossy-safe render tests.
+- [x] [B312] Ensure the first letter is the first visible glyph in rendered frames for all directions (HARD example shows later letters entering first). Resolved with B2T order correction, entry alignment, and render-based detection tests.
+- [ ] [B313] Fix bottom-to-top vertical rendering order (natural order), missing letters, and garbled overlap in rendered frames. Pending band ordering and visibility alignment updates with render-verified tests.
 
 ## Maintenance (400–499)
 
@@ -97,3 +145,12 @@ proceed
 - [B308] Priority: medium. Goal: add integration test verifying top-to-bottom words lead with the first letter (HARD). Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for T2B first-letter entry.
 - [B309] Priority: medium. Goal: add integration test verifying HARD leads for L2R/R2L/T2B/B2T. Dependencies: direction seed with emit payload. Docs: none. Plan: add test, run `make ci`. Deliverable: coverage for all direction first-letter entry.
 - [B310] Priority: high. Goal: ensure L2R ordering leads with the first letter (example: "писать" should display as reversed order while moving L2R). Dependencies: direction ordering map, rendering test. Docs: update `README.md` note if ordering changes. Plan: adjust ordering map, replace emit-based ordering tests with rendered-frame assertions, run `make ci`. Deliverable: correct L2R order and rendering-based coverage.
+- [B311] Priority: high. Goal: reduce alpha output file size while keeping alpha and acceptable speed. Dependencies: ffmpeg encoder/pix_fmt support. Docs: update README/ARCHITECTURE. Plan: tune alpha codec/compression defaults, adjust render-based tests for lossy output if needed, run `make ci`. Deliverable: smaller alpha output by default.
+- [x] [B313] Resolved B2T letter ordering/visibility issues with normalized band positions, entry alignment, and render-based tests for natural order and completeness.
+- [x] [F100] Resolved RSVP ORP renderer with SRT-only mode, ORP anchoring, weighted timing + punctuation pauses, and render-verified integration tests.
+- [ ] [I107] Allow optional font size bounds for criss_cross renderer via --font-min/--font-max and explicit --subtitle-renderer criss_cross selection.
+- [x] [I107] Resolved criss_cross renderer selection with optional font-min/font-max bounds and integration tests.
+- [ ] [I108] Make punctuation removal the default across renderers with an explicit keep-punctuation override.
+- [x] [I108] Resolved default punctuation removal with keep-punctuation override across renderers.
+- [ ] [B314] Allow RSVP windows longer than max per-word timing by leaving idle slack instead of failing.
+- [x] [B314] Resolved RSVP long-window handling by capping per-word timing and allowing trailing idle frames, with integration coverage.
