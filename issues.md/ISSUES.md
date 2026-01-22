@@ -154,3 +154,7 @@ proceed
 - [x] [I108] Resolved default punctuation removal with keep-punctuation override across renderers.
 - [ ] [B314] Allow RSVP windows longer than max per-word timing by leaving idle slack instead of failing.
 - [x] [B314] Resolved RSVP long-window handling by capping per-word timing and allowing trailing idle frames, with integration coverage.
+- [ ] [B315] Fix CI failures by tracking required fonts used by render_text_video tests.
+- [x] [B315] Resolved CI font failures by tracking assets/fonts and updating .gitignore.
+- [ ] [B316] Replace asset font tracking with test fixtures to keep assets uncommitted and CI green.
+- [x] [B316] Resolved CI font fixture handling by moving fonts to tests/fixtures and restoring assets ignore.
