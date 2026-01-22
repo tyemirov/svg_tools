@@ -204,14 +204,19 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 ./render_text_video.py \
     --input-text-file <PATH> \
     --output-video-file <PATH.mov> \
-    --width <PIXELS> \
-    --height <PIXELS> \
+    [--width <PIXELS>] \
+    [--height <PIXELS>] \
+    [--background-image <PATH>] \
     --duration-seconds <FLOAT> \
     [--fps <INT>] \
     [--background <transparent|#RRGGBB>] \
     [--fonts-dir <PATH>] \
     [--direction-seed <INT>] \
     [--remove-punctuation] \
+    [--keep-punctuation] \
+    [--subtitle-renderer <motion|criss_cross|rsvp_orp>] \
+    [--font-min <INT>] \
+    [--font-max <INT>] \
     [--emit-directions]
 ```
 
@@ -219,12 +224,20 @@ Requires `ffmpeg` with `prores_ks` and `yuva444p10le` support.
 
 * Input text must be valid UTF-8 and is split on whitespace.
 * `.srt` input files are parsed as subtitle windows; words render only inside each time range.
+* Provide either `--background-image` or `--width`/`--height` (image derives dimensions).
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
-* `--remove-punctuation` strips punctuation from words before rendering.
+* Punctuation is stripped by default; use `--keep-punctuation` to preserve punctuation.
+* `--remove-punctuation` is accepted for compatibility but matches the default behavior.
+* RSVP punctuation pauses only apply when punctuation is preserved.
+* `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
+* `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT input (single word at a time with ORP anchoring).
+* RSVP mode requires SRT timing and does not use motion directions or per-word random sizing.
+* `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`.
+* `--background` applies only when no background image is used.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
-* Vertical directions animate letters with staggered offsets (so letters move independently).
-* `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, and `letter_offsets`, then exits without rendering.
+* Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for L2R/T2B so the first letter leads the motion, and vertical directions also add staggered offsets.
+* `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, `letter_offsets`, `letter_bands`, and `letter_band_sizes` (band offsets centered on the motion axis), then exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
 
 ---
