@@ -182,6 +182,8 @@ proceed
 - [x] [I114] Sanitize SRT input in audio_to_text by ignoring indices and timestamps before alignment. Resolved with SRT sanitization and integration coverage.
 - [x] [I115] Relax RSVP subtitle timing to best-effort fit for short windows (compress timing and allow slight drift). Resolved with RSVP best-effort scheduling and integration coverage.
 - [x] [I114] Add audio_to_text CLI with --input-audio/--input-text to produce forced-alignment SRT output. Resolved with uv CLI support, forced-alignment SRT emission, and integration tests.
+- [ ] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download.
+- [x] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download. Resolved with built-in UI server, background queue, and SRT download endpoint plus docs.
 
 ## Tooling Baseline (I114)
 - `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).

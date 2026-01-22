@@ -250,6 +250,32 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 
 ---
 
+### `audio_to_text.py`
+
+Force-align audio or video to a provided transcript and emit an SRT with word-level timing.
+
+**CLI usage:**
+
+```shell
+./audio_to_text.py \
+    --input-audio <PATH> \
+    --input-text <PATH> \
+    [--output-srt <PATH.srt>] \
+    [--language <CODE>] \
+    [--device <auto|cpu|cuda>] \
+    [--align-model <HF_MODEL_NAME>]
+```
+
+**UI usage:**
+
+```shell
+./audio_to_text.py --ui [--ui-host <HOST>] [--ui-port <PORT>]
+```
+
+The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
+
+---
+
 ### `text_to_svg.py`
 
 Render any text into a valid single-path SVG file.

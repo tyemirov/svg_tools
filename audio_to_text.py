@@ -12,14 +12,26 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import os
 import re
+import shutil
 import sys
-from dataclasses import dataclass
+import tempfile
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from enum import Enum
+from html import escape
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from string import Template
 from typing import Iterable, Sequence
+from urllib.parse import urlparse
 
 import whisperx
 
@@ -34,10 +46,34 @@ ALIGNMENT_CODE = "audio_to_text.align.failed"
 ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
 DEVICE_UNAVAILABLE_CODE = "audio_to_text.device.unavailable"
 DEVICE_AUTO = "auto"
-SUPPORTED_DEVICES = {DEVICE_AUTO, "cpu", "cuda"}
+DEVICE_LABELS = {
+    DEVICE_AUTO: "Auto (GPU if available)",
+    "cpu": "CPU",
+    "cuda": "CUDA",
+}
+SUPPORTED_DEVICES = set(DEVICE_LABELS.keys())
+DEFAULT_UI_HOST = "127.0.0.1"
+DEFAULT_UI_PORT = 7860
+MAX_PORT = 65535
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}$"
 )
+
+
+class RequestMode(str, Enum):
+    """Supported runtime modes."""
+
+    CLI = "cli"
+    UI = "ui"
+
+
+class JobStatus(str, Enum):
+    """Lifecycle states for UI jobs."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class AlignmentValidationError(ValueError):
@@ -60,26 +96,17 @@ class AlignmentPipelineError(RuntimeError):
 class AlignmentRequest:
     """Parsed CLI request for alignment."""
 
-    input_audio: str
-    input_text: str
-    output_srt: str
+    mode: RequestMode
+    input_audio: str | None
+    input_text: str | None
+    output_srt: str | None
     language: str
     device: str
     align_model: str | None
+    ui_host: str
+    ui_port: int
 
     def __post_init__(self) -> None:
-        if not self.input_audio.strip():
-            raise AlignmentValidationError(
-                INVALID_CONFIG_CODE, "input-audio must be non-empty"
-            )
-        if not self.input_text.strip():
-            raise AlignmentValidationError(
-                INVALID_CONFIG_CODE, "input-text must be non-empty"
-            )
-        if not self.output_srt.strip():
-            raise AlignmentValidationError(
-                INVALID_CONFIG_CODE, "output-srt must be non-empty"
-            )
         if not self.language.strip():
             raise AlignmentValidationError(
                 INVALID_CONFIG_CODE, "language must be non-empty"
@@ -88,10 +115,32 @@ class AlignmentRequest:
             raise AlignmentValidationError(
                 INVALID_CONFIG_CODE, f"invalid device: {self.device!r}"
             )
-        if not self.output_srt.lower().endswith(".srt"):
-            raise AlignmentValidationError(
-                INVALID_CONFIG_CODE, "output-srt must end with .srt"
-            )
+        if self.mode == RequestMode.CLI:
+            if self.input_audio is None or not self.input_audio.strip():
+                raise AlignmentValidationError(
+                    INPUT_AUDIO_CODE, "input-audio is required"
+                )
+            if self.input_text is None or not self.input_text.strip():
+                raise AlignmentValidationError(
+                    INPUT_TEXT_CODE, "input-text is required"
+                )
+            if self.output_srt is None or not self.output_srt.strip():
+                raise AlignmentValidationError(
+                    INVALID_CONFIG_CODE, "output-srt must be non-empty"
+                )
+            if not self.output_srt.lower().endswith(".srt"):
+                raise AlignmentValidationError(
+                    INVALID_CONFIG_CODE, "output-srt must end with .srt"
+                )
+        else:
+            if not self.ui_host.strip():
+                raise AlignmentValidationError(
+                    INVALID_CONFIG_CODE, "ui-host must be non-empty"
+                )
+            if self.ui_port <= 0 or self.ui_port > MAX_PORT:
+                raise AlignmentValidationError(
+                    INVALID_CONFIG_CODE, "ui-port is invalid"
+                )
 
 
 @dataclass(frozen=True)
@@ -116,6 +165,64 @@ class AlignedWord:
                 ALIGNMENT_TIMESTAMP_CODE,
                 "aligned word end is not after start",
             )
+
+
+@dataclass(frozen=True)
+class UiDefaults:
+    """Default configuration values for the UI."""
+
+    language: str
+    device: str
+    align_model: str | None
+
+
+@dataclass(frozen=True)
+class AlignmentJob:
+    """State snapshot for a background alignment job."""
+
+    job_id: str
+    status: JobStatus
+    message: str | None
+    output_srt: str | None
+
+
+@dataclass
+class JobStore:
+    """Thread-safe store for background UI jobs."""
+
+    root_dir: Path
+    jobs: dict[str, AlignmentJob] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def create_job(self) -> AlignmentJob:
+        """Create a new queued job."""
+        job_id = uuid.uuid4().hex
+        job = AlignmentJob(job_id, JobStatus.QUEUED, None, None)
+        with self.lock:
+            self.jobs[job_id] = job
+        return job
+
+    def get_job(self, job_id: str) -> AlignmentJob | None:
+        """Fetch a job by ID."""
+        with self.lock:
+            return self.jobs.get(job_id)
+
+    def update_job(
+        self,
+        job_id: str,
+        status: JobStatus,
+        message: str | None = None,
+        output_srt: str | None = None,
+    ) -> AlignmentJob:
+        """Update a job's status."""
+        job = AlignmentJob(job_id, status, message, output_srt)
+        with self.lock:
+            self.jobs[job_id] = job
+        return job
+
+    def job_dir(self, job_id: str) -> Path:
+        """Return the directory for job artifacts."""
+        return self.root_dir / job_id
 
 
 def configure_logging() -> None:
@@ -200,26 +307,70 @@ def default_output_path(input_audio: str) -> str:
     return str(Path(input_audio).with_suffix(".srt"))
 
 
+def normalize_device_value(raw_value: str, default_device: str) -> str:
+    """Normalize a device string for UI usage."""
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return default_device
+    if normalized not in SUPPORTED_DEVICES:
+        raise AlignmentValidationError(
+            INVALID_CONFIG_CODE, f"invalid device: {raw_value!r}"
+        )
+    return normalized
+
+
+def normalize_form_value(raw_value: object, default_value: str) -> str:
+    """Normalize a form value into a string."""
+    if raw_value is None:
+        return default_value
+    if isinstance(raw_value, list):
+        if not raw_value:
+            return default_value
+        return str(raw_value[0])
+    return str(raw_value)
+
+
 def parse_args(argv: Sequence[str]) -> AlignmentRequest:
     """Parse CLI arguments into an AlignmentRequest."""
     parser = argparse.ArgumentParser(prog="audio_to_text.py", add_help=True)
-    parser.add_argument("--input-audio", required=True)
-    parser.add_argument("--input-text", required=True)
+    parser.add_argument("--ui", action="store_true")
+    parser.add_argument("--ui-host", default=DEFAULT_UI_HOST)
+    parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT)
+    parser.add_argument("--input-audio")
+    parser.add_argument("--input-text")
     parser.add_argument("--output-srt", default=None)
     parser.add_argument("--language", default="en")
     parser.add_argument("--device", default=DEVICE_AUTO)
     parser.add_argument("--align-model", default=None)
     parsed = parser.parse_args(argv)
 
-    output_srt = parsed.output_srt or default_output_path(parsed.input_audio)
-    device_value = str(parsed.device).strip().lower()
+    mode = RequestMode.UI if parsed.ui else RequestMode.CLI
+    input_audio = parsed.input_audio
+    input_text = parsed.input_text
+    output_srt = None
+    if mode == RequestMode.CLI:
+        if input_audio is None:
+            raise AlignmentValidationError(
+                INPUT_AUDIO_CODE, "input-audio is required"
+            )
+        if input_text is None:
+            raise AlignmentValidationError(
+                INPUT_TEXT_CODE, "input-text is required"
+            )
+        output_srt = parsed.output_srt or default_output_path(input_audio)
+
+    language_value = str(parsed.language).strip().lower()
+    device_value = str(parsed.device).strip().lower() or DEVICE_AUTO
     return AlignmentRequest(
-        input_audio=parsed.input_audio,
-        input_text=parsed.input_text,
+        mode=mode,
+        input_audio=input_audio,
+        input_text=input_text,
         output_srt=output_srt,
-        language=parsed.language,
+        language=language_value,
         device=device_value,
         align_model=parsed.align_model,
+        ui_host=str(parsed.ui_host),
+        ui_port=int(parsed.ui_port),
     )
 
 
@@ -229,7 +380,9 @@ def load_alignment_model(
     """Load the alignment model and metadata."""
     try:
         return whisperx.load_align_model(
-            language_code=language, device=device, model_name=model_name
+            language_code=language,
+            device=device,
+            model_name=model_name,
         )
     except Exception as exc:
         raise AlignmentPipelineError(
@@ -262,7 +415,9 @@ def align_words(
     audio_duration = float(len(audio)) / float(whisperx.audio.SAMPLE_RATE)
     segments = [{"start": 0.0, "end": audio_duration, "text": transcript_text}]
 
-    align_model, metadata = load_alignment_model(language, device, align_model_name)
+    align_model, metadata = load_alignment_model(
+        language, device, align_model_name
+    )
     try:
         result = whisperx.align(
             segments,
@@ -374,26 +529,749 @@ def write_srt_file(file_path: str, content: str) -> None:
         ) from exc
 
 
+def build_ui_html(defaults: UiDefaults) -> str:
+    """Render the UI HTML with default values."""
+    device_options = []
+    for device_key, label in DEVICE_LABELS.items():
+        selected = " selected" if device_key == defaults.device else ""
+        device_options.append(
+            f'<option value="{escape(device_key)}"{selected}>{escape(label)}</option>'
+        )
+    template = Template(
+        """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Audio to Text Alignment</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Fraunces:wght@600&display=swap");
+    :root {
+      --bg-start: #f7efe4;
+      --bg-end: #dfe8e9;
+      --ink: #1d1b19;
+      --muted: #5f5b55;
+      --accent: #ff7a59;
+      --accent-strong: #f1542d;
+      --accent-cool: #2b7a78;
+      --panel: rgba(255, 255, 255, 0.85);
+      --shadow: 0 24px 60px rgba(29, 27, 25, 0.14);
+      --stroke: rgba(29, 27, 25, 0.1);
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Space Grotesk", "Helvetica Neue", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top left, #ffffff 0%, var(--bg-start) 35%, var(--bg-end) 100%);
+      overflow-x: hidden;
+    }
+    .ambient {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 15% 20%, rgba(255, 122, 89, 0.25), transparent 45%),
+        radial-gradient(circle at 80% 10%, rgba(43, 122, 120, 0.2), transparent 50%),
+        radial-gradient(circle at 20% 80%, rgba(250, 205, 140, 0.3), transparent 55%);
+      mix-blend-mode: multiply;
+      z-index: 0;
+    }
+    .shell {
+      position: relative;
+      z-index: 1;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 56px 24px 80px;
+      display: grid;
+      gap: 36px;
+    }
+    .hero {
+      display: grid;
+      gap: 16px;
+      animation: floatIn 0.8s ease-out;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(29, 27, 25, 0.08);
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      font-family: "Fraunces", "Georgia", serif;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      margin: 0;
+      line-height: 1.1;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 560px;
+    }
+    .panel {
+      background: var(--panel);
+      border-radius: 24px;
+      padding: 28px;
+      border: 1px solid var(--stroke);
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 22px;
+      animation: floatIn 1s ease-out;
+    }
+    .drop-grid {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+    .dropzone {
+      border: 2px dashed rgba(29, 27, 25, 0.2);
+      border-radius: 18px;
+      padding: 24px;
+      min-height: 160px;
+      background: rgba(255, 255, 255, 0.6);
+      display: grid;
+      gap: 8px;
+      justify-items: start;
+      align-content: center;
+      transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+      cursor: pointer;
+      position: relative;
+    }
+    .dropzone input[type="file"] {
+      display: none;
+    }
+    .dropzone.is-dragging {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: 0 12px 24px rgba(255, 122, 89, 0.2);
+    }
+    .dropzone.is-filled {
+      border-color: rgba(43, 122, 120, 0.6);
+      background: rgba(43, 122, 120, 0.08);
+    }
+    .drop-title {
+      font-weight: 600;
+      font-size: 1rem;
+    }
+    .drop-meta {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .options {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+    .option {
+      display: grid;
+      gap: 8px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .option input,
+    .option select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      font-family: "Space Grotesk", "Helvetica Neue", "Segoe UI", sans-serif;
+      font-size: 0.95rem;
+      background: rgba(255, 255, 255, 0.9);
+      color: var(--ink);
+    }
+    .actions {
+      display: grid;
+      gap: 12px;
+    }
+    .run-button {
+      border: none;
+      border-radius: 14px;
+      padding: 14px 18px;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #fff;
+      background: linear-gradient(120deg, var(--accent), var(--accent-strong));
+      box-shadow: 0 14px 30px rgba(241, 84, 45, 0.25);
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .run-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 18px 34px rgba(241, 84, 45, 0.3);
+    }
+    .run-button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    .status {
+      display: grid;
+      gap: 6px;
+      font-size: 0.95rem;
+    }
+    .status-main {
+      font-weight: 600;
+    }
+    .status-sub {
+      color: var(--muted);
+    }
+    .download {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--accent-cool);
+      text-decoration: none;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+    .download:hover {
+      color: #206362;
+    }
+    .error {
+      padding: 12px 14px;
+      background: rgba(241, 84, 45, 0.12);
+      border: 1px solid rgba(241, 84, 45, 0.25);
+      border-radius: 12px;
+      color: #8a2a16;
+      font-size: 0.9rem;
+    }
+    .hidden {
+      display: none;
+    }
+    @keyframes floatIn {
+      0% { opacity: 0; transform: translateY(12px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    @media (max-width: 640px) {
+      .panel {
+        padding: 22px;
+      }
+      .run-button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="ambient"></div>
+  <main class="shell">
+    <section class="hero">
+      <div class="badge">Audio to Text</div>
+      <h1>Forced alignment, ready for subtitles</h1>
+      <p>Drop audio or video plus your transcript. A background job aligns each word and builds an SRT you can download.</p>
+    </section>
+    <section class="panel">
+      <div class="drop-grid">
+        <div class="dropzone" id="audio-zone">
+          <input id="audio-file" type="file" accept="audio/*,video/*">
+          <div class="drop-title">Audio or video file</div>
+          <div class="drop-meta" id="audio-meta">Drop a file or click to browse</div>
+        </div>
+        <div class="dropzone" id="text-zone">
+          <input id="text-file" type="file" accept=".txt,.md,.srt,.sbv">
+          <div class="drop-title">Transcript text file</div>
+          <div class="drop-meta" id="text-meta">Drop a file or click to browse</div>
+        </div>
+      </div>
+      <div class="options">
+        <label class="option">
+          <span>Language</span>
+          <input id="language" type="text" value="$language_value" placeholder="en">
+        </label>
+        <label class="option">
+          <span>Alignment model (optional)</span>
+          <input id="align-model" type="text" value="$align_model_value" placeholder="auto">
+        </label>
+        <label class="option">
+          <span>Device</span>
+          <select id="device">
+            $device_options
+          </select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="run-button" class="run-button">Align and Build SRT</button>
+      </div>
+      <div class="status">
+        <div class="status-main" id="status-line">Ready to align.</div>
+        <div class="status-sub" id="status-sub">Upload files to begin.</div>
+        <a id="download-link" class="download hidden" href="#">Download SRT</a>
+      </div>
+      <div class="error hidden" id="error-line"></div>
+    </section>
+  </main>
+  <script>
+    const audioZone = document.getElementById("audio-zone");
+    const textZone = document.getElementById("text-zone");
+    const audioInput = document.getElementById("audio-file");
+    const textInput = document.getElementById("text-file");
+    const audioMeta = document.getElementById("audio-meta");
+    const textMeta = document.getElementById("text-meta");
+    const runButton = document.getElementById("run-button");
+    const statusLine = document.getElementById("status-line");
+    const statusSub = document.getElementById("status-sub");
+    const downloadLink = document.getElementById("download-link");
+    const errorLine = document.getElementById("error-line");
+    const languageInput = document.getElementById("language");
+    const alignModelInput = document.getElementById("align-model");
+    const deviceSelect = document.getElementById("device");
+    let audioFile = null;
+    let textFile = null;
+    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    function setStatus(mainText, subText) {
+      statusLine.textContent = mainText;
+      statusSub.textContent = subText;
+    }
+
+    function setError(message) {
+      errorLine.textContent = message;
+      errorLine.classList.remove("hidden");
+    }
+
+    function clearError() {
+      errorLine.classList.add("hidden");
+      errorLine.textContent = "";
+    }
+
+    function markZone(zone, meta, file) {
+      zone.classList.add("is-filled");
+      meta.textContent = file.name;
+    }
+
+    function wireDropzone(zone, input, meta, assignFile) {
+      zone.addEventListener("click", () => input.click());
+      zone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        zone.classList.add("is-dragging");
+      });
+      zone.addEventListener("dragleave", () => zone.classList.remove("is-dragging"));
+      zone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        zone.classList.remove("is-dragging");
+        if (event.dataTransfer.files.length === 0) {
+          return;
+        }
+        const file = event.dataTransfer.files[0];
+        assignFile(file);
+        markZone(zone, meta, file);
+      });
+      input.addEventListener("change", () => {
+        if (!input.files || input.files.length === 0) {
+          return;
+        }
+        const file = input.files[0];
+        assignFile(file);
+        markZone(zone, meta, file);
+      });
+    }
+
+    wireDropzone(audioZone, audioInput, audioMeta, (file) => { audioFile = file; });
+    wireDropzone(textZone, textInput, textMeta, (file) => { textFile = file; });
+
+    async function startJob() {
+      clearError();
+      downloadLink.classList.add("hidden");
+      if (!audioFile || !textFile) {
+        setError("Select both an audio file and a transcript file.");
+        return;
+      }
+      runButton.disabled = true;
+      setStatus("Queued.", "Uploading files and preparing alignment.");
+      const formData = new FormData();
+      formData.append("audio", audioFile, audioFile.name);
+      formData.append("text", textFile, textFile.name);
+      formData.append("language", languageInput.value.trim() || "en");
+      formData.append("align_model", alignModelInput.value.trim());
+      formData.append("device", deviceSelect.value);
+      let response = await fetch("/api/jobs", { method: "POST", body: formData });
+      let payload = await response.json();
+      if (!response.ok) {
+        setError(payload.error || "Failed to start alignment.");
+        runButton.disabled = false;
+        return;
+      }
+      await pollStatus(payload.job_id);
+    }
+
+    async function pollStatus(jobId) {
+      while (true) {
+        let response = await fetch(`/api/jobs/${jobId}`);
+        if (!response.ok) {
+          setError("Failed to check job status.");
+          break;
+        }
+        let payload = await response.json();
+        if (payload.status === "completed") {
+          setStatus("Complete.", payload.message || "SRT is ready to download.");
+          downloadLink.href = `/api/jobs/${jobId}/srt`;
+          downloadLink.classList.remove("hidden");
+          break;
+        }
+        if (payload.status === "failed") {
+          setError(payload.message || "Alignment failed.");
+          break;
+        }
+        if (payload.status === "queued") {
+          setStatus("Queued.", payload.message || "Waiting for worker.");
+        } else {
+          setStatus("Running.", payload.message || "Aligning words to audio.");
+        }
+        await delay(1000);
+      }
+      runButton.disabled = false;
+    }
+
+    runButton.addEventListener("click", () => startJob());
+  </script>
+</body>
+</html>
+"""
+    )
+    return template.substitute(
+        language_value=escape(defaults.language),
+        align_model_value=escape(defaults.align_model or ""),
+        device_options="\n            ".join(device_options),
+    )
+
+
+def run_ui_server(request: AlignmentRequest) -> int:
+    """Run the web UI server."""
+    defaults = UiDefaults(
+        language=request.language,
+        device=request.device,
+        align_model=request.align_model,
+    )
+    root_dir = Path(tempfile.mkdtemp(prefix="audio_to_text_ui_"))
+    job_store = JobStore(root_dir=root_dir)
+    executor = ThreadPoolExecutor(max_workers=2)
+    handler = build_ui_handler(job_store, executor, defaults)
+    server = ThreadingHTTPServer((request.ui_host, request.ui_port), handler)
+    LOGGER.info(
+        "audio_to_text.ui.ready: http://%s:%s",
+        request.ui_host,
+        request.ui_port,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        LOGGER.info("audio_to_text.ui.shutdown: received interrupt")
+    finally:
+        server.server_close()
+        executor.shutdown(wait=False)
+        shutil.rmtree(root_dir, ignore_errors=True)
+    return 0
+
+
+def build_ui_handler(
+    store: JobStore,
+    executor: ThreadPoolExecutor,
+    defaults: UiDefaults,
+) -> type[BaseHTTPRequestHandler]:
+    """Create a request handler for the UI server."""
+
+    class UiHandler(BaseHTTPRequestHandler):
+        """HTTP handler for the audio_to_text UI."""
+
+        def log_message(self, format_string: str, *args: object) -> None:
+            """Route HTTP logs through the logger."""
+            LOGGER.info("audio_to_text.ui: %s", format_string % args)
+
+        def do_GET(self) -> None:
+            """Serve UI pages and job status."""
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                self.send_html(build_ui_html(defaults))
+                return
+            if parsed.path.startswith("/api/jobs/"):
+                job_id = parsed.path.split("/")[3] if parsed.path.count("/") >= 3 else ""
+                if parsed.path.endswith("/srt"):
+                    self.send_srt(job_id)
+                    return
+                self.send_job_status(job_id)
+                return
+            self.send_error_response(HTTPStatus.NOT_FOUND, "Not found")
+
+        def do_POST(self) -> None:
+            """Handle UI job creation."""
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/jobs":
+                self.handle_create_job()
+                return
+            self.send_error_response(HTTPStatus.NOT_FOUND, "Not found")
+
+        def send_html(self, content: str) -> None:
+            """Send HTML content."""
+            payload = content.encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def send_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
+            """Send a JSON payload."""
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def send_error_response(self, status: HTTPStatus, message: str) -> None:
+            """Send an error JSON payload."""
+            self.send_json(status, {"error": message})
+
+        def send_job_status(self, job_id: str) -> None:
+            """Return the current job status."""
+            job = store.get_job(job_id)
+            if job is None:
+                self.send_error_response(HTTPStatus.NOT_FOUND, "Job not found")
+                return
+            self.send_json(
+                HTTPStatus.OK,
+                {
+                    "job_id": job.job_id,
+                    "status": job.status.value,
+                    "message": job.message,
+                    "output_ready": bool(job.output_srt),
+                },
+            )
+
+        def send_srt(self, job_id: str) -> None:
+            """Return the generated SRT file."""
+            job = store.get_job(job_id)
+            if job is None or job.output_srt is None:
+                self.send_error_response(HTTPStatus.NOT_FOUND, "SRT not available")
+                return
+            output_path = Path(job.output_srt)
+            try:
+                content = output_path.read_text(encoding="utf-8")
+            except OSError:
+                self.send_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "SRT read failed")
+                return
+            payload = content.encode("utf-8")
+            filename = f"{job_id}.srt"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/x-subrip; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def handle_create_job(self) -> None:
+            """Accept uploads and queue a background alignment job."""
+            import cgi
+
+            content_type = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in content_type:
+                self.send_error_response(HTTPStatus.BAD_REQUEST, "Expected multipart form")
+                return
+            environ = {
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+            }
+            content_length = self.headers.get("Content-Length")
+            if content_length:
+                environ["CONTENT_LENGTH"] = content_length
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ=environ,
+            )
+            try:
+                audio_field = form["audio"]
+                text_field = form["text"]
+            except KeyError:
+                self.send_error_response(HTTPStatus.BAD_REQUEST, "Missing file fields")
+                return
+            if isinstance(audio_field, list) or isinstance(text_field, list):
+                self.send_error_response(HTTPStatus.BAD_REQUEST, "Invalid file upload")
+                return
+            if not getattr(audio_field, "filename", "") or not getattr(text_field, "filename", ""):
+                self.send_error_response(HTTPStatus.BAD_REQUEST, "Invalid file upload")
+                return
+
+            job = store.create_job()
+            job_dir = store.job_dir(job.job_id)
+            job_dir.mkdir(parents=True, exist_ok=True)
+            audio_suffix = Path(audio_field.filename).suffix or ".bin"
+            text_suffix = Path(text_field.filename).suffix or ".txt"
+            audio_path = job_dir / f"audio{audio_suffix}"
+            text_path = job_dir / f"text{text_suffix}"
+            output_path = job_dir / "alignment.srt"
+
+            try:
+                with open(audio_path, "wb") as audio_target:
+                    shutil.copyfileobj(audio_field.file, audio_target)
+                with open(text_path, "wb") as text_target:
+                    shutil.copyfileobj(text_field.file, text_target)
+            except OSError:
+                store.update_job(job.job_id, JobStatus.FAILED, "Upload write failed")
+                self.send_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Upload failed")
+                return
+
+            language_raw = normalize_form_value(
+                form.getvalue("language", defaults.language), defaults.language
+            )
+            language_value = language_raw.strip() or defaults.language.strip()
+            if not language_value:
+                store.update_job(
+                    job.job_id, JobStatus.FAILED, "language must be non-empty"
+                )
+                self.send_error_response(
+                    HTTPStatus.BAD_REQUEST, "language must be non-empty"
+                )
+                return
+            align_model_raw = normalize_form_value(
+                form.getvalue("align_model", defaults.align_model or ""),
+                defaults.align_model or "",
+            )
+            align_model_value = align_model_raw.strip() or None
+            try:
+                device_value = normalize_device_value(
+                    normalize_form_value(
+                        form.getvalue("device", defaults.device), defaults.device
+                    ),
+                    defaults.device,
+                )
+            except AlignmentValidationError as exc:
+                store.update_job(job.job_id, JobStatus.FAILED, f"{exc.code}: {exc}")
+                self.send_error_response(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+
+            executor.submit(
+                run_alignment_job,
+                store,
+                job.job_id,
+                str(audio_path),
+                str(text_path),
+                str(output_path),
+                language_value,
+                device_value,
+                align_model_value,
+            )
+            self.send_json(HTTPStatus.OK, {"job_id": job.job_id})
+
+    return UiHandler
+
+
+def run_alignment_job(
+    store: JobStore,
+    job_id: str,
+    audio_path: str,
+    text_path: str,
+    output_path: str,
+    language: str,
+    device: str,
+    align_model: str | None,
+) -> None:
+    """Process a background alignment job."""
+    store.update_job(
+        job_id,
+        JobStatus.RUNNING,
+        message="Preparing input files",
+    )
+    try:
+        ensure_audio_file_exists(audio_path)
+        store.update_job(
+            job_id,
+            JobStatus.RUNNING,
+            message="Reading transcript text",
+        )
+        transcript_text = normalize_transcript(
+            read_utf8_text_strict(text_path),
+            text_path,
+        )
+        store.update_job(
+            job_id,
+            JobStatus.RUNNING,
+            message="Resolving device",
+        )
+        resolved_device = resolve_device(device)
+        store.update_job(
+            job_id,
+            JobStatus.RUNNING,
+            message="Aligning words to audio",
+        )
+        words = align_words(
+            audio_path,
+            transcript_text,
+            language,
+            resolved_device,
+            align_model,
+        )
+        store.update_job(
+            job_id,
+            JobStatus.RUNNING,
+            message="Building subtitle output",
+        )
+        srt_content = build_srt(words)
+        store.update_job(
+            job_id,
+            JobStatus.RUNNING,
+            message="Writing subtitle file",
+        )
+        write_srt_file(output_path, srt_content)
+        store.update_job(
+            job_id,
+            JobStatus.COMPLETED,
+            message="Complete",
+            output_srt=output_path,
+        )
+    except AlignmentValidationError as exc:
+        store.update_job(
+            job_id,
+            JobStatus.FAILED,
+            f"{exc.code}: {exc}",
+        )
+    except AlignmentPipelineError as exc:
+        store.update_job(
+            job_id,
+            JobStatus.FAILED,
+            f"{exc.code}: {exc}",
+        )
+    except Exception as exc:
+        store.update_job(
+            job_id,
+            JobStatus.FAILED,
+            f"audio_to_text.unhandled_error: {str(exc).strip()}",
+        )
+
+
 def main() -> int:
     """CLI entrypoint."""
     configure_logging()
     try:
         request = parse_args(sys.argv[1:])
-        resolved_device = resolve_device(request.device)
-        ensure_audio_file_exists(request.input_audio)
+        if request.mode == RequestMode.UI:
+            return run_ui_server(request)
+        ensure_audio_file_exists(request.input_audio or "")
         transcript_text = normalize_transcript(
-            read_utf8_text_strict(request.input_text),
-            request.input_text,
+            read_utf8_text_strict(request.input_text or ""),
+            request.input_text or "",
         )
+        resolved_device = resolve_device(request.device)
         words = align_words(
-            request.input_audio,
+            request.input_audio or "",
             transcript_text,
             request.language,
             resolved_device,
             request.align_model,
         )
         srt_content = build_srt(words)
-        write_srt_file(request.output_srt, srt_content)
+        write_srt_file(request.output_srt or "", srt_content)
         LOGGER.info("audio_to_text.output.srt_written: %s", request.output_srt)
         return 0
     except AlignmentValidationError as exc:
