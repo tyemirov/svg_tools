@@ -964,6 +964,51 @@ def test_rsvp_orp_punctuation_pause_extends_word(tmp_path: Path) -> None:
     assert counts[words[0]] + counts[words[1]] == total_frames
 
 
+def test_rsvp_orp_allows_long_window(tmp_path: Path) -> None:
+    """Allow RSVP windows longer than max per-word timing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    width = 240
+    height = 180
+    duration_seconds = "3.0"
+    fps = "10"
+    input_text = "alpha beta"
+
+    srt_content = "1\n00:00:00,000 --> 00:00:03,000\nalpha beta\n"
+    input_path = tmp_path / "long.srt"
+    input_path.write_text(srt_content, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    args.extend(["--subtitle-renderer", "rsvp_orp"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+
+    total_frames = int(round(float(duration_seconds) * float(fps)))
+    alpha_frames = 0
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(output_path, frame_index / float(fps))
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        if frame_has_alpha(frame_bytes, width, height):
+            alpha_frames += 1
+
+    max_frames = int(math.floor(0.700 * float(fps)))
+    expected_frames = max_frames * len(input_text.split())
+    assert alpha_frames == expected_frames
+
+
 def test_font_bounds_require_criss_cross_renderer(tmp_path: Path) -> None:
     """Reject font bounds unless criss_cross renderer is selected."""
     repo_root = Path(__file__).resolve().parents[1]
