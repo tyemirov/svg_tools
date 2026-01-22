@@ -771,7 +771,7 @@ def test_rsvp_orp_anchor_is_stable(tmp_path: Path) -> None:
             width=width,
             height=height,
         )
-        args.extend(["--subtitle-renderer", "rsvp_orp"])
+        args.extend(["--subtitle-renderer", "rsvp_orp", "--keep-punctuation"])
         result = run_render_text_video(args, repo_root)
         assert result.returncode == 0
         return output_path
@@ -903,7 +903,7 @@ def test_rsvp_orp_punctuation_pause_extends_word(tmp_path: Path) -> None:
             width=width,
             height=height,
         )
-        args.extend(["--subtitle-renderer", "rsvp_orp"])
+        args.extend(["--subtitle-renderer", "rsvp_orp", "--keep-punctuation"])
         result = run_render_text_video(args, repo_root)
         assert result.returncode == 0
         return output_path
@@ -1085,9 +1085,9 @@ def test_remove_punctuation(tmp_path: Path) -> None:
         fps=fps,
     )
 
-    args_strip = base_args + ["--remove-punctuation", "--direction-seed", seed]
-    stripped = run_render_text_video(args_strip, repo_root)
-    assert stripped.returncode == 0
+    args_default = base_args + ["--direction-seed", seed]
+    default_result = run_render_text_video(args_default, repo_root)
+    assert default_result.returncode == 0
 
     output_path_keep = tmp_path / "out-keep.mov"
     args_keep = build_common_args(
@@ -1098,14 +1098,14 @@ def test_remove_punctuation(tmp_path: Path) -> None:
         duration_seconds=duration_seconds,
         fps=fps,
     )
-    args_keep.extend(["--direction-seed", seed])
+    args_keep.extend(["--direction-seed", seed, "--keep-punctuation"])
     kept = run_render_text_video(args_keep, repo_root)
     assert kept.returncode == 0
 
     time_seconds = float(duration_seconds) / 2.0
-    stripped_frame = extract_raw_frame(output_path, time_seconds)
+    default_frame = extract_raw_frame(output_path, time_seconds)
     kept_frame = extract_raw_frame(output_path_keep, time_seconds)
-    assert stripped_frame != kept_frame
+    assert default_frame != kept_frame
 
 
 def test_background_image_derives_dimensions(tmp_path: Path) -> None:
