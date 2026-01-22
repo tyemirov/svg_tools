@@ -170,3 +170,7 @@ proceed
 - [x] [B319] Resolved baseline alignment coverage with mixed-script render verification and test dependency updates.
 - [ ] [B320] Validate even dimensions for opaque H.264 output to avoid runtime ffmpeg failures.
 - [x] [B320] Resolved even-dimension validation with CLI checks and integration tests for odd sizes.
+
+## Features Addendum (100-199)
+
+- [x] [F101] Add audio track support in render_text_video with duration derived from audio/SRT (longest wins) and a duration override warning that trims/pads audio to the requested length. Resolved with audio muxing, ffprobe-derived duration, trim/pad warning, and integration tests.

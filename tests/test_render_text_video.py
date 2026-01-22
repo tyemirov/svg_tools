@@ -7,6 +7,7 @@ import math
 import shutil
 import struct
 import subprocess
+import wave
 import zlib
 from pathlib import Path
 from typing import List
@@ -102,6 +103,29 @@ def probe_video_stream(video_path: Path) -> dict[str, str]:
         "codec_name": stream.get("codec_name", ""),
         "pix_fmt": stream.get("pix_fmt", ""),
     }
+
+
+def probe_video_duration(media_path: Path) -> float:
+    """Return the video stream duration in seconds for a media file."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(media_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return float(result.stdout.strip())
 
 
 def baseline_offset(font_path: Path, font_size: int, character: str) -> int:
@@ -382,12 +406,25 @@ def write_png(
     target_path.write_bytes(png_bytes)
 
 
+def write_wav(
+    target_path: Path, duration_seconds: float, sample_rate: int = 48000
+) -> None:
+    """Write a silent PCM WAV file."""
+    frame_count = max(1, int(round(duration_seconds * sample_rate)))
+    silence = b"\x00\x00" * frame_count
+    with wave.open(str(target_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(silence)
+
+
 def build_common_args(
     script_path: Path,
     input_path: Path,
     output_path: Path,
     fonts_dir: Path,
-    duration_seconds: str,
+    duration_seconds: str | None,
     fps: str,
     include_dimensions: bool = True,
     width: int = 64,
@@ -400,8 +437,6 @@ def build_common_args(
         str(input_path),
         "--output-video-file",
         str(output_path),
-        "--duration-seconds",
-        duration_seconds,
         "--fps",
         fps,
         "--background",
@@ -409,6 +444,8 @@ def build_common_args(
         "--fonts-dir",
         str(fonts_dir),
     ]
+    if duration_seconds is not None:
+        args.extend(["--duration-seconds", duration_seconds])
     if include_dimensions:
         args.extend(["--width", str(width), "--height", str(height)])
     return args
@@ -1505,3 +1542,96 @@ def test_requires_dimensions_without_background(tmp_path: Path) -> None:
     result = run_render_text_video(args, repo_root)
     assert result.returncode != 0
     assert "render_text_video.input.invalid_config" in result.stderr
+
+
+def test_audio_track_sets_duration_without_override(tmp_path: Path) -> None:
+    """Use audio duration when no explicit duration is provided."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    input_text = "alpha beta gamma"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    audio_path = tmp_path / "audio.wav"
+    audio_duration = 0.5
+    write_wav(audio_path, audio_duration)
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=None,
+        fps="10",
+    )
+    args.extend(["--audio-track", str(audio_path)])
+
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    duration = probe_video_duration(output_path)
+    assert math.isclose(duration, audio_duration, abs_tol=0.05)
+
+
+def test_audio_and_srt_use_longest_duration(tmp_path: Path) -> None:
+    """Prefer the longest duration between audio and SRT timing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    srt_content = """1\n00:00:00,000 --> 00:00:00,800\nhello world\n"""
+    srt_path = tmp_path / "timed.srt"
+    write_srt_file(srt_path, srt_content)
+
+    audio_path = tmp_path / "audio.wav"
+    audio_duration = 0.5
+    write_wav(audio_path, audio_duration)
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=srt_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=None,
+        fps="10",
+    )
+    args.extend(["--audio-track", str(audio_path)])
+
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    duration = probe_video_duration(output_path)
+    assert math.isclose(duration, 0.8, abs_tol=0.05)
+
+
+def test_duration_override_warns_and_trims_audio(tmp_path: Path) -> None:
+    """Warn when duration override is provided and trim audio to fit."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    input_text = "alpha beta"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    audio_path = tmp_path / "audio.wav"
+    write_wav(audio_path, 0.8)
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.4",
+        fps="10",
+    )
+    args.extend(["--audio-track", str(audio_path)])
+
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    assert "render_text_video.input.duration_override" in result.stderr
+    duration = probe_video_duration(output_path)
+    assert math.isclose(duration, 0.4, abs_tol=0.05)

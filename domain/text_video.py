@@ -17,6 +17,7 @@ INPUT_FILE_CODE = "render_text_video.input.file_error"
 FONT_DIR_CODE = "render_text_video.input.fonts_missing"
 FONT_LOAD_CODE = "render_text_video.input.fonts_unloadable"
 BACKGROUND_IMAGE_CODE = "render_text_video.input.background_image"
+AUDIO_FILE_CODE = "render_text_video.input.audio_track"
 INVALID_RENDERER_CODE = "render_text_video.input.invalid_renderer"
 
 SRT_TIME_RANGE_PATTERN = re.compile(

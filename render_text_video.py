@@ -30,6 +30,7 @@ from domain.text_video import (
     BACKGROUND_IMAGE_CODE,
     FONT_DIR_CODE,
     FONT_LOAD_CODE,
+    AUDIO_FILE_CODE,
     INPUT_FILE_CODE,
     INVALID_CONFIG_CODE,
     INVALID_COLOR_CODE,
@@ -76,6 +77,7 @@ FFMPEG_NOT_FOUND_CODE = "render_text_video.ffmpeg.not_found"
 FFMPEG_EXEC_CODE = "render_text_video.ffmpeg.exec_error"
 FFMPEG_UNSUPPORTED_CODE = "render_text_video.ffmpeg.unsupported"
 FFMPEG_PROCESS_CODE = "render_text_video.ffmpeg.process_failed"
+FFMPEG_PROBE_CODE = "render_text_video.ffmpeg.probe_error"
 INTERNAL_DIRECTION_CODE = "render_text_video.internal.invalid_direction"
 PRORES_PROFILE = "4444"
 PRORES_PIXEL_FORMAT = "yuva444p10le"
@@ -88,6 +90,9 @@ H264_PIXEL_FORMAT = "yuv420p"
 H264_CRF = "20"
 H264_PRESET = "veryfast"
 H264_TUNE = "stillimage"
+AUDIO_CODEC = "aac"
+AUDIO_BITRATE = "192k"
+AUDIO_PAD_FILTER = "apad"
 
 
 class RenderPipelineError(RuntimeError):
@@ -158,6 +163,9 @@ class RenderRequest:
     remove_punctuation: bool
     background_image: Image.Image | None
     alpha_mode: VideoAlphaMode
+    audio_track: str | None
+    duration_override: bool
+    input_text: str
 
 
 @dataclass(frozen=True)
@@ -231,6 +239,85 @@ def read_utf8_text_strict(file_path: str) -> str:
             INPUT_FILE_CODE,
             f"input text file is not valid UTF-8 at byte offset {exc.start}",
         ) from exc
+
+
+def is_srt_input(file_path: str, text_value: str) -> bool:
+    """Return True when input should be treated as SRT."""
+    if file_path.lower().endswith(".srt"):
+        return True
+    return any(
+        SRT_TIME_RANGE_PATTERN.fullmatch(line.strip())
+        for line in text_value.splitlines()
+        if line.strip()
+    )
+
+
+def compute_srt_duration_seconds(
+    text_value: str, remove_punctuation: bool
+) -> float:
+    """Compute the maximum end time for SRT content."""
+    windows = parse_srt(text_value, remove_punctuation)
+    return max(window.end_seconds for window in windows)
+
+
+def ensure_ffprobe_available() -> None:
+    """Ensure ffprobe is installed and executable."""
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
+        raise RenderPipelineError(FFMPEG_NOT_FOUND_CODE, "ffprobe not on PATH")
+    try:
+        subprocess.run(
+            [ffprobe_path, "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+    except Exception as exc:
+        raise RenderPipelineError(
+            FFMPEG_EXEC_CODE, "ffprobe exists but could not be executed"
+        ) from exc
+
+
+def get_audio_duration_seconds(audio_path: str) -> float:
+    """Return the audio duration in seconds for the provided file."""
+    if not os.path.isfile(audio_path):
+        raise RenderValidationError(
+            AUDIO_FILE_CODE, f"audio track not found: {audio_path}"
+        )
+    ensure_ffprobe_available()
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr_text = result.stderr.strip()
+        raise RenderPipelineError(
+            FFMPEG_PROBE_CODE,
+            f"ffprobe failed for audio track: {stderr_text}",
+        )
+    try:
+        duration_seconds = float(result.stdout.strip())
+    except ValueError as exc:
+        raise RenderValidationError(
+            AUDIO_FILE_CODE, f"audio track duration unavailable: {audio_path}"
+        ) from exc
+    if duration_seconds <= 0:
+        raise RenderValidationError(
+            AUDIO_FILE_CODE, f"audio track duration invalid: {audio_path}"
+        )
+    return duration_seconds
 
 
 def list_font_files(fonts_dir: str) -> list[str]:
@@ -981,7 +1068,9 @@ ENCODING_SPECS = {
 
 
 def open_ffmpeg_process(
-    config: RenderConfig, alpha_mode: VideoAlphaMode
+    config: RenderConfig,
+    alpha_mode: VideoAlphaMode,
+    audio_track: str | None,
 ) -> subprocess.Popen[bytes]:
     """Start ffmpeg for a raw RGBA frame stream."""
     ensure_ffmpeg_available()
@@ -1000,11 +1089,25 @@ def open_ffmpeg_process(
         str(config.fps),
         "-i",
         "-",
-        "-an",
-        "-c:v",
-        encoding.codec,
     ]
+    if audio_track:
+        ffmpeg_cmd.extend(["-i", audio_track, "-map", "0:v:0", "-map", "1:a:0"])
+    else:
+        ffmpeg_cmd.append("-an")
+    ffmpeg_cmd.extend(["-c:v", encoding.codec])
     ffmpeg_cmd.extend(encoding.args_builder(config))
+    if audio_track:
+        ffmpeg_cmd.extend(
+            [
+                "-c:a",
+                AUDIO_CODEC,
+                "-b:a",
+                AUDIO_BITRATE,
+                "-af",
+                AUDIO_PAD_FILTER,
+                "-shortest",
+            ]
+        )
     ffmpeg_cmd.extend(
         [
             "-pix_fmt",
@@ -1033,22 +1136,17 @@ def build_subtitle_windows(
     subtitle_renderer: SubtitleRenderer,
 ) -> Tuple[SubtitleWindow, ...]:
     """Build subtitle windows from plain text or SRT input."""
-    is_srt_extension = config.input_text_file.lower().endswith(".srt")
-    is_srt_content = any(
-        SRT_TIME_RANGE_PATTERN.fullmatch(line.strip())
-        for line in text_value.splitlines()
-        if line.strip()
-    )
+    is_srt = is_srt_input(config.input_text_file, text_value)
 
     if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
-        if not (is_srt_extension or is_srt_content):
+        if not is_srt:
             raise RenderValidationError(
                 INVALID_CONFIG_CODE,
                 "rsvp_orp requires SRT input",
             )
         return parse_srt(text_value, remove_punctuation)
 
-    if is_srt_extension or is_srt_content:
+    if is_srt:
         return parse_srt(text_value, remove_punctuation)
 
     words = tokenize_words(text_value, remove_punctuation)
@@ -1061,14 +1159,36 @@ def build_subtitle_windows(
     )
 
 
+def trim_subtitle_windows(
+    windows: Sequence[SubtitleWindow], duration_seconds: float
+) -> Tuple[SubtitleWindow, ...]:
+    """Trim subtitle windows that exceed the provided duration."""
+    trimmed: list[SubtitleWindow] = []
+    for window in windows:
+        if window.start_seconds >= duration_seconds:
+            continue
+        if window.end_seconds <= duration_seconds:
+            trimmed.append(window)
+            continue
+        trimmed.append(
+            SubtitleWindow(
+                start_seconds=window.start_seconds,
+                end_seconds=duration_seconds,
+                words=window.words,
+            )
+        )
+    return tuple(trimmed)
+
+
 def build_render_plan_from_input(
-    config: RenderConfig, remove_punctuation: bool
+    config: RenderConfig, remove_punctuation: bool, input_text: str, duration_override: bool
 ) -> RenderPlan:
     """Load input text and build a render plan."""
-    input_text = read_utf8_text_strict(config.input_text_file)
     windows = build_subtitle_windows(
         config, input_text, remove_punctuation, config.subtitle_renderer
     )
+    if duration_override:
+        windows = trim_subtitle_windows(windows, config.duration_seconds)
     if config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
         return build_rsvp_render_plan(
             windows=windows,
@@ -1126,9 +1246,10 @@ def render_video(
     directions: Sequence[str],
     background_image: Image.Image | None,
     alpha_mode: VideoAlphaMode,
+    audio_track: str | None,
 ) -> None:
     """Render frames based on the render plan."""
-    ffmpeg_process = open_ffmpeg_process(config, alpha_mode)
+    ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
     if not ffmpeg_process.stdin:
         raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
 
@@ -1258,9 +1379,10 @@ def render_rsvp_video(
     tokens: Sequence[RsvpToken],
     background_image: Image.Image | None,
     alpha_mode: VideoAlphaMode,
+    audio_track: str | None,
 ) -> None:
     """Render frames for RSVP subtitles."""
-    ffmpeg_process = open_ffmpeg_process(config, alpha_mode)
+    ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
     if not ffmpeg_process.stdin:
         raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
 
@@ -1345,13 +1467,14 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     parser.add_argument("--output-video-file", default="video.mov")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
-    parser.add_argument("--duration-seconds", type=float, required=True)
+    parser.add_argument("--duration-seconds", type=float, default=None)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument(
         "--background", default="transparent", help="transparent (default) or #RRGGBB"
     )
     parser.add_argument("--background-image", default=None)
     parser.add_argument("--fonts-dir", default="fonts")
+    parser.add_argument("--audio-track", default=None)
     parser.add_argument("--direction-seed", type=int, default=None)
     parser.add_argument("--emit-directions", action="store_true")
     punctuation_group = parser.add_mutually_exclusive_group()
@@ -1366,6 +1489,15 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     remove_punctuation = not parsed.keep_punctuation
     background_rgba = parse_hex_color_to_rgba(parsed.background)
     background_image = None
+    input_text = read_utf8_text_strict(parsed.input_text_file)
+    is_srt = is_srt_input(parsed.input_text_file, input_text)
+    srt_duration = (
+        compute_srt_duration_seconds(input_text, remove_punctuation) if is_srt else None
+    )
+    audio_track = parsed.audio_track
+    audio_duration = (
+        get_audio_duration_seconds(audio_track) if audio_track else None
+    )
 
     if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
         if parsed.direction_seed is not None:
@@ -1405,6 +1537,27 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         width = parsed.width
         height = parsed.height
 
+    duration_override = parsed.duration_seconds is not None
+    if duration_override:
+        duration_seconds = parsed.duration_seconds
+        if audio_track or srt_duration is not None:
+            LOGGER.warning(
+                "render_text_video.input.duration_override: using duration-seconds; "
+                "audio will be trimmed or padded when supplied"
+            )
+    else:
+        duration_candidates = []
+        if srt_duration is not None:
+            duration_candidates.append(srt_duration)
+        if audio_duration is not None:
+            duration_candidates.append(audio_duration)
+        if not duration_candidates:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "duration-seconds is required without audio track or SRT timing",
+            )
+        duration_seconds = max(duration_candidates)
+
     alpha_mode = select_alpha_mode(background_rgba, background_image)
     if alpha_mode == VideoAlphaMode.OPAQUE and (width % 2 or height % 2):
         raise RenderValidationError(
@@ -1431,7 +1584,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         output_video_file=parsed.output_video_file,
         width=width,
         height=height,
-        duration_seconds=parsed.duration_seconds,
+        duration_seconds=duration_seconds,
         fps=parsed.fps,
         background_rgba=background_rgba,
         fonts_dir=parsed.fonts_dir,
@@ -1448,10 +1601,15 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         remove_punctuation=remove_punctuation,
         background_image=background_image,
         alpha_mode=alpha_mode,
+        audio_track=audio_track,
+        duration_override=duration_override,
+        input_text=input_text,
     )
 
 
-def validate_ffmpeg_capabilities(alpha_mode: VideoAlphaMode) -> None:
+def validate_ffmpeg_capabilities(
+    alpha_mode: VideoAlphaMode, audio_track: str | None
+) -> None:
     """Validate ffmpeg encoders and pixel formats for output."""
     encoding = ENCODING_SPECS[alpha_mode]
     try:
@@ -1499,6 +1657,12 @@ def validate_ffmpeg_capabilities(alpha_mode: VideoAlphaMode) -> None:
                 f"ffmpeg {encoding.encoder_name} encoder does not support alpha_bits",
             )
 
+    if audio_track and AUDIO_CODEC not in encoders_result.stdout:
+        raise RenderPipelineError(
+            FFMPEG_UNSUPPORTED_CODE,
+            f"ffmpeg does not support {AUDIO_CODEC} encoder",
+        )
+
     pixfmts_result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-pix_fmts"],
         stdout=subprocess.PIPE,
@@ -1520,13 +1684,21 @@ def main() -> int:
     try:
         request = parse_args(sys.argv[1:])
         plan = build_render_plan_from_input(
-            request.config, request.remove_punctuation
+            request.config,
+            request.remove_punctuation,
+            request.input_text,
+            request.duration_override,
         )
         if request.config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
             tokens = build_rsvp_tokens(plan.words, request.config)
-            validate_ffmpeg_capabilities(request.alpha_mode)
+            validate_ffmpeg_capabilities(request.alpha_mode, request.audio_track)
             render_rsvp_video(
-                request.config, plan, tokens, request.background_image, request.alpha_mode
+                request.config,
+                plan,
+                tokens,
+                request.background_image,
+                request.alpha_mode,
+                request.audio_track,
             )
             return 0
         rng = random.Random(request.direction_seed)
@@ -1573,7 +1745,7 @@ def main() -> int:
                 letter_band_sizes,
             )
             return 0
-        validate_ffmpeg_capabilities(request.alpha_mode)
+        validate_ffmpeg_capabilities(request.alpha_mode, request.audio_track)
         render_video(
             request.config,
             plan,
@@ -1581,6 +1753,7 @@ def main() -> int:
             directions,
             request.background_image,
             request.alpha_mode,
+            request.audio_track,
         )
         return 0
     except RenderValidationError as exc:
