@@ -933,7 +933,7 @@ def build_subtitle_windows(
                 INVALID_CONFIG_CODE,
                 "rsvp_orp requires SRT input",
             )
-        return parse_srt(text_value, remove_punctuation=False)
+        return parse_srt(text_value, remove_punctuation)
 
     if is_srt_extension or is_srt_content:
         return parse_srt(text_value, remove_punctuation)
@@ -1231,13 +1231,16 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     parser.add_argument("--fonts-dir", default="fonts")
     parser.add_argument("--direction-seed", type=int, default=None)
     parser.add_argument("--emit-directions", action="store_true")
-    parser.add_argument("--remove-punctuation", action="store_true")
+    punctuation_group = parser.add_mutually_exclusive_group()
+    punctuation_group.add_argument("--remove-punctuation", action="store_true")
+    punctuation_group.add_argument("--keep-punctuation", action="store_true")
     parser.add_argument("--subtitle-renderer", default="motion")
     parser.add_argument("--font-min", type=int, default=None)
     parser.add_argument("--font-max", type=int, default=None)
 
     parsed = parser.parse_args(argv)
     subtitle_renderer = parse_subtitle_renderer(parsed.subtitle_renderer)
+    remove_punctuation = not parsed.keep_punctuation
     background_rgba = parse_hex_color_to_rgba(parsed.background)
     background_image = None
 
@@ -1249,11 +1252,6 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         if parsed.emit_directions:
             raise RenderValidationError(
                 INVALID_CONFIG_CODE, "emit-directions is not supported for rsvp_orp"
-            )
-        if parsed.remove_punctuation:
-            raise RenderValidationError(
-                INVALID_CONFIG_CODE,
-                "remove-punctuation is not supported for rsvp_orp",
             )
         if parsed.font_min is not None or parsed.font_max is not None:
             raise RenderValidationError(
@@ -1313,7 +1311,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         config=config,
         direction_seed=parsed.direction_seed,
         emit_directions=parsed.emit_directions,
-        remove_punctuation=parsed.remove_punctuation,
+        remove_punctuation=remove_punctuation,
         background_image=background_image,
     )
 

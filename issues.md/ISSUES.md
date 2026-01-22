@@ -150,3 +150,7 @@ proceed
 - [x] [F100] Resolved RSVP ORP renderer with SRT-only mode, ORP anchoring, weighted timing + punctuation pauses, and render-verified integration tests.
 - [ ] [I107] Allow optional font size bounds for criss_cross renderer via --font-min/--font-max and explicit --subtitle-renderer criss_cross selection.
 - [x] [I107] Resolved criss_cross renderer selection with optional font-min/font-max bounds and integration tests.
+- [ ] [I108] Make punctuation removal the default across renderers with an explicit keep-punctuation override.
+- [x] [I108] Resolved default punctuation removal with keep-punctuation override across renderers.
+- [ ] [B314] Allow RSVP windows longer than max per-word timing by leaving idle slack instead of failing.
+- [x] [B314] Resolved RSVP long-window handling by capping per-word timing and allowing trailing idle frames, with integration coverage.
