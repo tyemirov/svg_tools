@@ -5,7 +5,7 @@
 #   "pillow>=10"
 # ]
 # ///
-"""Render animated word-by-word text into a MOV with alpha."""
+"""Render animated word-by-word text into a MOV (alpha only when needed)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Sequence, Tuple
+from enum import Enum
+from typing import Callable, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -82,6 +83,11 @@ PRORES_QSCALE_BASE = 15
 PRORES_QSCALE_MAX = 28
 PRORES_QSCALE_REFERENCE_PIXELS = 1920 * 1080
 PRORES_ALPHA_BITS = "8"
+H264_CODEC = "libx264"
+H264_PIXEL_FORMAT = "yuv420p"
+H264_CRF = "20"
+H264_PRESET = "veryfast"
+H264_TUNE = "stillimage"
 
 
 class RenderPipelineError(RuntimeError):
@@ -90,6 +96,13 @@ class RenderPipelineError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class VideoAlphaMode(str, Enum):
+    """Alpha handling mode for video output."""
+
+    ALPHA = "alpha"
+    OPAQUE = "opaque"
 
 
 @dataclass(frozen=True)
@@ -144,6 +157,18 @@ class RenderRequest:
     emit_directions: bool
     remove_punctuation: bool
     background_image: Image.Image | None
+    alpha_mode: VideoAlphaMode
+
+
+@dataclass(frozen=True)
+class VideoEncodingSpec:
+    """Encoder settings for a specific alpha mode."""
+
+    codec: str
+    pix_fmt: str
+    args_builder: Callable[[RenderConfig], Tuple[str, ...]]
+    encoder_name: str
+    alpha_bits: str | None
 
 
 def configure_logging() -> None:
@@ -246,6 +271,16 @@ def load_background_image(image_path: str) -> Image.Image:
     return image
 
 
+def select_alpha_mode(
+    background_rgba: Tuple[int, int, int, int],
+    background_image: Image.Image | None,
+) -> VideoAlphaMode:
+    """Select alpha output mode based on the requested background."""
+    if background_image is None and background_rgba[3] == 0:
+        return VideoAlphaMode.ALPHA
+    return VideoAlphaMode.OPAQUE
+
+
 def filter_loadable_fonts(font_files: Sequence[str], sample_size: int) -> list[str]:
     """Filter font files to those loadable at the sample size."""
     loadable_fonts: list[str] = []
@@ -339,7 +374,9 @@ def render_letter_image(
     letter_height = max(1, bottom - top)
     letter_image = Image.new("RGBA", (letter_width, letter_height), (0, 0, 0, 0))
     letter_draw = ImageDraw.Draw(letter_image)
-    letter_draw.text((-left, -top), character, font=font, fill=color_rgba)
+    letter_draw.text(
+        (-left, -top), character, font=font, fill=color_rgba, anchor="ls"
+    )
     return letter_image
 
 
@@ -353,7 +390,7 @@ def build_letter_layout(
     letters: list[LetterToken] = []
     for character in word_text:
         letter_bbox = draw_context.textbbox(
-            (0, 0), character, font=font, stroke_width=0
+            (0, 0), character, font=font, stroke_width=0, anchor="ls"
         )
         letter_image = render_letter_image(
             character, font, color_rgba, letter_bbox
@@ -569,6 +606,7 @@ def compute_letter_position(
     frame_height: int,
     letter_bbox: Tuple[int, int, int, int],
     band_position: int,
+    baseline_y: float,
 ) -> Tuple[int, int]:
     """Compute a letter position given a motion direction and progress."""
     left, top, right, bottom = letter_bbox
@@ -584,9 +622,8 @@ def compute_letter_position(
         center_x = (
             start_center_x + (end_center_x - start_center_x) * clamped_progress
         ) + band_position
-        center_y = frame_height / 2.0
         x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(center_y - center_offset_y))
+        y_value = int(round(baseline_y + top))
         return (x_value, y_value)
 
     if direction == "R2L":
@@ -595,9 +632,8 @@ def compute_letter_position(
         center_x = (
             start_center_x + (end_center_x - start_center_x) * clamped_progress
         ) + band_position
-        center_y = frame_height / 2.0
         x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(center_y - center_offset_y))
+        y_value = int(round(baseline_y + top))
         return (x_value, y_value)
 
     if direction == "T2B":
@@ -634,6 +670,20 @@ def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ..
         normalized = index_value / float(max(1, letter_count - 1))
         offsets.append((0.5 - normalized) * LETTER_STAGGER_RATIO)
     return tuple(offsets)
+
+
+def compute_baseline_y(font: ImageFont.FreeTypeFont, frame_height: int) -> float:
+    """Compute a baseline Y position using font metrics."""
+    default_baseline = frame_height / 2.0
+    try:
+        ascent, descent = font.getmetrics()
+    except Exception:
+        return default_baseline
+    min_baseline = float(ascent)
+    max_baseline = float(frame_height - descent)
+    if min_baseline <= max_baseline:
+        return min(max(default_baseline, min_baseline), max_baseline)
+    return min_baseline
 
 
 def should_reverse_letter_order(direction: str) -> bool:
@@ -863,7 +913,12 @@ def align_letter_band_positions_to_entry(
         min_shift = max(min_shift, min_allowed - position)
         max_shift = min(max_shift, max_allowed - position)
     if min_shift <= max_shift:
-        shift = min(max(shift, min_shift), max_shift)
+        if not (min_shift <= shift <= max_shift) and direction in HORIZONTAL_DIRECTIONS:
+            shift = desired_edge - entry_edge
+        else:
+            shift = min(max(shift, min_shift), max_shift)
+    elif direction in HORIZONTAL_DIRECTIONS:
+        shift = desired_edge - entry_edge
     else:
         shift = 0.0
     return tuple(int(round(position + shift)) for position in band_positions)
@@ -882,10 +937,56 @@ def compute_prores_qscale(width: int, height: int) -> int:
     return max(PRORES_QSCALE_BASE, min(PRORES_QSCALE_MAX, qscale))
 
 
-def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
+def build_prores_args(config: RenderConfig) -> Tuple[str, ...]:
+    """Build ProRes codec arguments."""
+    qscale = compute_prores_qscale(config.width, config.height)
+    return (
+        "-profile:v",
+        PRORES_PROFILE,
+        "-qscale:v",
+        str(qscale),
+        "-alpha_bits",
+        PRORES_ALPHA_BITS,
+    )
+
+
+def build_h264_args(config: RenderConfig) -> Tuple[str, ...]:
+    """Build H.264 codec arguments."""
+    return (
+        "-crf",
+        H264_CRF,
+        "-preset",
+        H264_PRESET,
+        "-tune",
+        H264_TUNE,
+    )
+
+
+ENCODING_SPECS = {
+    VideoAlphaMode.ALPHA: VideoEncodingSpec(
+        codec="prores_ks",
+        pix_fmt=PRORES_PIXEL_FORMAT,
+        args_builder=build_prores_args,
+        encoder_name="prores_ks",
+        alpha_bits=PRORES_ALPHA_BITS,
+    ),
+    VideoAlphaMode.OPAQUE: VideoEncodingSpec(
+        codec=H264_CODEC,
+        pix_fmt=H264_PIXEL_FORMAT,
+        args_builder=build_h264_args,
+        encoder_name=H264_CODEC,
+        alpha_bits=None,
+    ),
+}
+
+
+def open_ffmpeg_process(
+    config: RenderConfig, alpha_mode: VideoAlphaMode
+) -> subprocess.Popen[bytes]:
     """Start ffmpeg for a raw RGBA frame stream."""
     ensure_ffmpeg_available()
 
+    encoding = ENCODING_SPECS[alpha_mode]
     ffmpeg_cmd = [
         "ffmpeg",
         "-y",
@@ -901,19 +1002,18 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
         "-",
         "-an",
         "-c:v",
-        "prores_ks",
-        "-profile:v",
-        PRORES_PROFILE,
-        "-qscale:v",
-        str(compute_prores_qscale(config.width, config.height)),
-        "-alpha_bits",
-        PRORES_ALPHA_BITS,
-        "-pix_fmt",
-        PRORES_PIXEL_FORMAT,
-        "-movflags",
-        "+faststart",
-        config.output_video_file,
+        encoding.codec,
     ]
+    ffmpeg_cmd.extend(encoding.args_builder(config))
+    ffmpeg_cmd.extend(
+        [
+            "-pix_fmt",
+            encoding.pix_fmt,
+            "-movflags",
+            "+faststart",
+            config.output_video_file,
+        ]
+    )
 
     try:
         return subprocess.Popen(
@@ -1025,9 +1125,10 @@ def render_video(
     tokens: Sequence[WordToken],
     directions: Sequence[str],
     background_image: Image.Image | None,
+    alpha_mode: VideoAlphaMode,
 ) -> None:
     """Render frames based on the render plan."""
-    ffmpeg_process = open_ffmpeg_process(config)
+    ffmpeg_process = open_ffmpeg_process(config, alpha_mode)
     if not ffmpeg_process.stdin:
         raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
 
@@ -1037,6 +1138,7 @@ def render_video(
     current_token: WordToken | None = None
     current_letter_offsets: Tuple[float, ...] = ()
     current_letter_bands: Tuple[int, ...] = ()
+    current_baseline_y = config.height / 2.0
 
     try:
         for frame_index in range(plan.total_frames):
@@ -1092,6 +1194,12 @@ def render_video(
                         config.width,
                         config.height,
                     )
+                    if direction in HORIZONTAL_DIRECTIONS:
+                        current_baseline_y = compute_baseline_y(
+                            current_token.style.font, config.height
+                        )
+                    else:
+                        current_baseline_y = config.height / 2.0
                 token = current_token
                 if token is None:
                     raise RenderPipelineError(
@@ -1114,6 +1222,7 @@ def render_video(
                         frame_height=config.height,
                         letter_bbox=letter.bbox,
                         band_position=current_letter_bands[letter_index],
+                        baseline_y=current_baseline_y,
                     )
                     frame_image.paste(letter.image, (pos_x, pos_y), letter.image)
 
@@ -1148,9 +1257,10 @@ def render_rsvp_video(
     plan: RenderPlan,
     tokens: Sequence[RsvpToken],
     background_image: Image.Image | None,
+    alpha_mode: VideoAlphaMode,
 ) -> None:
     """Render frames for RSVP subtitles."""
-    ffmpeg_process = open_ffmpeg_process(config)
+    ffmpeg_process = open_ffmpeg_process(config, alpha_mode)
     if not ffmpeg_process.stdin:
         raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
 
@@ -1295,11 +1405,17 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         width = parsed.width
         height = parsed.height
 
+    alpha_mode = select_alpha_mode(background_rgba, background_image)
     min_font_size, max_font_size = compute_font_size_range(width, height)
-    if parsed.font_min is not None:
+    if parsed.font_min is not None and parsed.font_max is not None:
         min_font_size = parsed.font_min
-    if parsed.font_max is not None:
         max_font_size = parsed.font_max
+    elif parsed.font_min is not None:
+        min_font_size = parsed.font_min
+        max_font_size = max(max_font_size, min_font_size)
+    elif parsed.font_max is not None:
+        max_font_size = parsed.font_max
+        min_font_size = min(min_font_size, max_font_size)
     if min_font_size > max_font_size:
         raise RenderValidationError(
             INVALID_CONFIG_CODE, "font-min exceeds font-max"
@@ -1326,11 +1442,13 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         emit_directions=parsed.emit_directions,
         remove_punctuation=remove_punctuation,
         background_image=background_image,
+        alpha_mode=alpha_mode,
     )
 
 
-def validate_ffmpeg_capabilities() -> None:
-    """Validate ffmpeg encoders and pixel formats required for alpha output."""
+def validate_ffmpeg_capabilities(alpha_mode: VideoAlphaMode) -> None:
+    """Validate ffmpeg encoders and pixel formats for output."""
+    encoding = ENCODING_SPECS[alpha_mode]
     try:
         version_result = subprocess.run(
             ["ffmpeg", "-version"],
@@ -1356,24 +1474,25 @@ def validate_ffmpeg_capabilities() -> None:
         text=True,
         check=True,
     )
-    if "prores_ks" not in encoders_result.stdout:
+    if encoding.encoder_name not in encoders_result.stdout:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
-            "ffmpeg does not support prores_ks encoder",
+            f"ffmpeg does not support {encoding.encoder_name} encoder",
         )
 
-    encoder_help = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-h", "encoder=prores_ks"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    if "alpha_bits" not in encoder_help.stdout:
-        raise RenderPipelineError(
-            FFMPEG_UNSUPPORTED_CODE,
-            "ffmpeg prores_ks encoder does not support alpha_bits",
+    if encoding.alpha_bits is not None:
+        encoder_help = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", f"encoder={encoding.encoder_name}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
         )
+        if "alpha_bits" not in encoder_help.stdout:
+            raise RenderPipelineError(
+                FFMPEG_UNSUPPORTED_CODE,
+                f"ffmpeg {encoding.encoder_name} encoder does not support alpha_bits",
+            )
 
     pixfmts_result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-pix_fmts"],
@@ -1382,10 +1501,10 @@ def validate_ffmpeg_capabilities() -> None:
         text=True,
         check=True,
     )
-    if PRORES_PIXEL_FORMAT not in pixfmts_result.stdout:
+    if encoding.pix_fmt not in pixfmts_result.stdout:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
-            f"ffmpeg does not support {PRORES_PIXEL_FORMAT} pixel format",
+            f"ffmpeg does not support {encoding.pix_fmt} pixel format",
         )
 
 
@@ -1400,9 +1519,9 @@ def main() -> int:
         )
         if request.config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
             tokens = build_rsvp_tokens(plan.words, request.config)
-            validate_ffmpeg_capabilities()
+            validate_ffmpeg_capabilities(request.alpha_mode)
             render_rsvp_video(
-                request.config, plan, tokens, request.background_image
+                request.config, plan, tokens, request.background_image, request.alpha_mode
             )
             return 0
         rng = random.Random(request.direction_seed)
@@ -1449,8 +1568,15 @@ def main() -> int:
                 letter_band_sizes,
             )
             return 0
-        validate_ffmpeg_capabilities()
-        render_video(request.config, plan, tokens, directions, request.background_image)
+        validate_ffmpeg_capabilities(request.alpha_mode)
+        render_video(
+            request.config,
+            plan,
+            tokens,
+            directions,
+            request.background_image,
+            request.alpha_mode,
+        )
         return 0
     except RenderValidationError as exc:
         LOGGER.error("%s: %s", exc.code, str(exc).strip())

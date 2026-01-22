@@ -194,9 +194,9 @@ HEIF/HEIC is supported via `pillow-heif`.
 
 ### `render_text_video.py`
 
-Render animated word-by-word text into a transparent ProRes 4444 MOV.
+Render animated word-by-word text into a MOV (transparent output uses ProRes 4444).
 
-Requires `ffmpeg` with `prores_ks` (alpha_bits) and `yuva444p10le` support.
+Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` support.
 
 **Usage:**
 
@@ -233,9 +233,10 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits) and `yuva444p10le` support.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT input (single word at a time with ORP anchoring).
 * RSVP mode requires SRT timing and does not use motion directions or per-word random sizing.
-* `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`.
+* `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`; if only one bound is provided, the other bound is clamped to it.
 * `--background` applies only when no background image is used.
 * ProRes output uses adaptive quantization plus 8-bit alpha to reduce file sizes on large frames.
+* Transparent output (no background image and `--background transparent`) uses ProRes 4444 with alpha; any opaque background uses H.264 without alpha for better compression.
 * Font sizes are randomized per word within a dynamic range derived from frame size (large enough to overflow the frame).
 * Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for L2R/T2B so the first letter leads the motion, and vertical directions also add staggered offsets.
 * `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, `letter_offsets`, `letter_bands`, and `letter_band_sizes` (band offsets centered on the motion axis), then exits without rendering.
