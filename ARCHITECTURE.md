@@ -28,7 +28,7 @@ using inline PEP 723 metadata.
 
 ## External dependencies
 - Python 3.11+ and `uv` on PATH.
-- `ffmpeg` with `prores_ks` and `yuva444p10le` support for `render_text_video.py`.
+- `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` support for `render_text_video.py`.
 - Fonts (TTF/OTF) provided via `--fonts-dir` for `render_text_video.py`.
 
 ## Common flow

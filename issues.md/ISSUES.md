@@ -158,3 +158,15 @@ proceed
 - [x] [B315] Resolved CI font failures by tracking assets/fonts and updating .gitignore.
 - [ ] [B316] Replace asset font tracking with test fixtures to keep assets uncommitted and CI green.
 - [x] [B316] Resolved CI font fixture handling by moving fonts to tests/fixtures and restoring assets ignore.
+- [ ] [B317] Reduce alpha MOV size further for long background renders (20GB/100s) with a smaller alpha payload.
+- [x] [B317] Resolved alpha MOV size by scaling ProRes quantization with frame size and using 8-bit alpha, plus ffmpeg capability checks.
+- [ ] [I109] Use non-alpha encoding when a background image or solid color is provided; reserve alpha output for transparent backgrounds.
+- [x] [I109] Resolved opaque output by switching to H.264 (libx264) when alpha is not needed and validating the codec in integration tests.
+- [ ] [I110] Allow `--font-max` alone to clamp the default minimum size for criss_cross rendering.
+- [x] [I110] Resolved font-max clamping by aligning the computed minimum to the provided max and adding render_text_video integration coverage.
+- [ ] [B318] Align horizontal letter rendering to a shared baseline to avoid wacky typography.
+- [x] [B318] Resolved baseline alignment by anchoring per-letter bboxes to the baseline and positioning horizontal letters using the baseline in render_text_video.
+- [ ] [B319] Add integration coverage for mixed-script baseline alignment (Latin + Cyrillic).
+- [x] [B319] Resolved baseline alignment coverage with mixed-script render verification and test dependency updates.
+- [ ] [B320] Validate even dimensions for opaque H.264 output to avoid runtime ffmpeg failures.
+- [x] [B320] Resolved even-dimension validation with CLI checks and integration tests for odd sizes.
