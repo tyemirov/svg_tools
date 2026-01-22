@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import shutil
 import struct
 import subprocess
@@ -14,6 +16,7 @@ ALPHA_THRESHOLD = 10
 TEMPLATE_MATCH_RATIO = 0.98
 FIRST_LETTER_MATCH_RATIO = 0.3
 ORDER_MATCH_RATIO = 0.3
+RSVP_MATCH_RATIO = 0.3
 DIRECTION_SEEDS = {
     "L2R": 2,
     "R2L": 1,
@@ -732,6 +735,377 @@ def test_b2t_word_is_natural_and_complete(tmp_path: Path) -> None:
     assert y_positions == sorted(y_positions)
 
 
+def test_rsvp_orp_anchor_is_stable(tmp_path: Path) -> None:
+    """Ensure RSVP ORP anchor stays stable across words."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    shutil.copy(source_font, fonts_dir / source_font.name)
+
+    width = 320
+    height = 240
+    sentence_duration_seconds = "1.2"
+    template_duration_seconds = "0.6"
+    fps = "10"
+    words = ["READING", "HARD"]
+    sentence_srt_end = "00:00:01,200"
+    template_srt_end = "00:00:00,600"
+
+    def render_words(word_text: str, output_name: str, srt_end: str, duration: str) -> Path:
+        srt_content = (
+            f"1\n00:00:00,000 --> {srt_end}\n"
+            f"{word_text}\n"
+        )
+        input_path = tmp_path / f"{output_name}.srt"
+        input_path.write_text(srt_content, encoding="utf-8")
+        output_path = tmp_path / f"{output_name}.mov"
+        args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds=duration,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        args.extend(["--subtitle-renderer", "rsvp_orp", "--keep-punctuation"])
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
+        return output_path
+
+    sentence_path = render_words(
+        " ".join(words), "rsvp-words", sentence_srt_end, sentence_duration_seconds
+    )
+    total_frames = int(round(float(sentence_duration_seconds) * float(fps)))
+    fps_value = float(fps)
+
+    templates = {}
+    for word in words:
+        word_path = render_words(
+            word, f"rsvp-{word}", template_srt_end, template_duration_seconds
+        )
+        templates[word] = template_from_first_visible_frame(
+            word_path,
+            int(round(float(template_duration_seconds) * float(fps))),
+            fps_value,
+            width,
+            height,
+        )
+
+    def orp_char(word_text: str) -> str:
+        core = word_text.rstrip(".,!?:;")
+        if not core:
+            core = word_text
+        if len(core) <= 1:
+            return core[0]
+        index = max(0, int(math.floor(len(core) * 0.35) - 1))
+        return core[index]
+
+    orp_templates = {}
+    for word in words:
+        letter = orp_char(word)
+        letter_path = render_words(
+            letter,
+            f"rsvp-orp-{word}",
+            template_srt_end,
+            template_duration_seconds,
+        )
+        orp_templates[word] = template_from_first_visible_frame(
+            letter_path,
+            int(round(float(template_duration_seconds) * float(fps))),
+            fps_value,
+            width,
+            height,
+        )
+
+    centers_by_word: dict[str, list[float]] = {word: [] for word in words}
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(sentence_path, frame_index / fps_value)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        if not frame_has_alpha(frame_bytes, width, height):
+            continue
+        search_bbox = alpha_bbox(frame_bytes, width, height)
+        ratios = {}
+        for word, (template_bytes, template_width, template_height) in templates.items():
+            ratios[word] = best_template_match_ratio(
+                frame_bytes,
+                width,
+                height,
+                template_bytes,
+                template_width,
+                template_height,
+                search_bbox,
+            )
+        best_word = max(ratios, key=ratios.get)
+        if ratios[best_word] < RSVP_MATCH_RATIO:
+            continue
+        template_bytes, template_width, template_height = orp_templates[best_word]
+        ratio, match_x, _ = best_template_match_location(
+            frame_bytes,
+            width,
+            height,
+            template_bytes,
+            template_width,
+            template_height,
+            search_bbox,
+        )
+        if ratio < RSVP_MATCH_RATIO:
+            continue
+        center_x = match_x + (template_width / 2.0)
+        centers_by_word[best_word].append(center_x)
+
+    for word in words:
+        assert centers_by_word[word]
+
+    avg_centers = {
+        word: sum(centers) / len(centers) for word, centers in centers_by_word.items()
+    }
+    assert abs(avg_centers[words[0]] - avg_centers[words[1]]) <= 2
+
+
+def test_rsvp_orp_punctuation_pause_extends_word(tmp_path: Path) -> None:
+    """Ensure RSVP punctuation pauses extend the punctuated word."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    fonts_dir = tmp_path / "fonts"
+    fonts_dir.mkdir()
+    shutil.copy(source_font, fonts_dir / source_font.name)
+
+    width = 320
+    height = 240
+    sentence_duration_seconds = "1.0"
+    template_duration_seconds = "0.6"
+    fps = "10"
+    words = ["HELLO,", "WORLD"]
+    sentence_srt_end = "00:00:01,000"
+    template_srt_end = "00:00:00,600"
+
+    def render_words(word_text: str, output_name: str, srt_end: str, duration: str) -> Path:
+        srt_content = (
+            f"1\n00:00:00,000 --> {srt_end}\n"
+            f"{word_text}\n"
+        )
+        input_path = tmp_path / f"{output_name}.srt"
+        input_path.write_text(srt_content, encoding="utf-8")
+        output_path = tmp_path / f"{output_name}.mov"
+        args = build_common_args(
+            script_path=script_path,
+            input_path=input_path,
+            output_path=output_path,
+            fonts_dir=fonts_dir,
+            duration_seconds=duration,
+            fps=fps,
+            width=width,
+            height=height,
+        )
+        args.extend(["--subtitle-renderer", "rsvp_orp", "--keep-punctuation"])
+        result = run_render_text_video(args, repo_root)
+        assert result.returncode == 0
+        return output_path
+
+    sentence_path = render_words(
+        " ".join(words),
+        "rsvp-punct",
+        sentence_srt_end,
+        sentence_duration_seconds,
+    )
+    total_frames = int(round(float(sentence_duration_seconds) * float(fps)))
+    fps_value = float(fps)
+
+    templates = {}
+    for index, word in enumerate(words):
+        word_path = render_words(
+            word,
+            f"rsvp-punct-word-{index}",
+            template_srt_end,
+            template_duration_seconds,
+        )
+        templates[word] = template_from_first_visible_frame(
+            word_path,
+            int(round(float(template_duration_seconds) * float(fps))),
+            fps_value,
+            width,
+            height,
+        )
+
+    counts = {word: 0 for word in words}
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(sentence_path, frame_index / fps_value)
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        if not frame_has_alpha(frame_bytes, width, height):
+            continue
+        search_bbox = alpha_bbox(frame_bytes, width, height)
+        ratios = {}
+        for word, (template_bytes, template_width, template_height) in templates.items():
+            ratios[word] = best_template_match_ratio(
+                frame_bytes,
+                width,
+                height,
+                template_bytes,
+                template_width,
+                template_height,
+                search_bbox,
+            )
+        best_word = max(ratios, key=ratios.get)
+        if ratios[best_word] < RSVP_MATCH_RATIO:
+            continue
+        counts[best_word] += 1
+
+    pause_frames = int(math.ceil(0.160 * float(fps)))
+    base_frames = (total_frames - pause_frames) // 2
+    assert counts[words[0]] == base_frames + pause_frames
+    assert counts[words[1]] == base_frames
+    assert counts[words[0]] + counts[words[1]] == total_frames
+
+
+def test_rsvp_orp_allows_long_window(tmp_path: Path) -> None:
+    """Allow RSVP windows longer than max per-word timing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    width = 240
+    height = 180
+    duration_seconds = "3.0"
+    fps = "10"
+    input_text = "alpha beta"
+
+    srt_content = "1\n00:00:00,000 --> 00:00:03,000\nalpha beta\n"
+    input_path = tmp_path / "long.srt"
+    input_path.write_text(srt_content, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    args.extend(["--subtitle-renderer", "rsvp_orp"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+
+    total_frames = int(round(float(duration_seconds) * float(fps)))
+    alpha_frames = 0
+    for frame_index in range(total_frames):
+        frame_bytes = extract_raw_frame(output_path, frame_index / float(fps))
+        if not frame_has_expected_size(frame_bytes, width, height):
+            continue
+        if frame_has_alpha(frame_bytes, width, height):
+            alpha_frames += 1
+
+    max_frames = int(math.floor(0.700 * float(fps)))
+    expected_frames = max_frames * len(input_text.split())
+    assert alpha_frames == expected_frames
+
+
+def test_font_bounds_require_criss_cross_renderer(tmp_path: Path) -> None:
+    """Reject font bounds unless criss_cross renderer is selected."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta gamma"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(["--font-min", "40"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
+
+
+def test_font_bounds_apply_for_criss_cross(tmp_path: Path) -> None:
+    """Apply font bounds when criss_cross renderer is used."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta gamma"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(
+        [
+            "--subtitle-renderer",
+            "criss_cross",
+            "--font-min",
+            "40",
+            "--font-max",
+            "50",
+            "--emit-directions",
+        ]
+    )
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    sizes = payload["font_sizes"]
+    assert sizes
+    assert all(40 <= size <= 50 for size in sizes)
+
+
+def test_font_bounds_invalid_range_fails(tmp_path: Path) -> None:
+    """Reject invalid font bounds where min exceeds max."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(
+        [
+            "--subtitle-renderer",
+            "criss_cross",
+            "--font-min",
+            "60",
+            "--font-max",
+            "20",
+        ]
+    )
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
+
+
 def test_remove_punctuation(tmp_path: Path) -> None:
     """Strip punctuation when requested."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -756,9 +1130,9 @@ def test_remove_punctuation(tmp_path: Path) -> None:
         fps=fps,
     )
 
-    args_strip = base_args + ["--remove-punctuation", "--direction-seed", seed]
-    stripped = run_render_text_video(args_strip, repo_root)
-    assert stripped.returncode == 0
+    args_default = base_args + ["--direction-seed", seed]
+    default_result = run_render_text_video(args_default, repo_root)
+    assert default_result.returncode == 0
 
     output_path_keep = tmp_path / "out-keep.mov"
     args_keep = build_common_args(
@@ -769,14 +1143,14 @@ def test_remove_punctuation(tmp_path: Path) -> None:
         duration_seconds=duration_seconds,
         fps=fps,
     )
-    args_keep.extend(["--direction-seed", seed])
+    args_keep.extend(["--direction-seed", seed, "--keep-punctuation"])
     kept = run_render_text_video(args_keep, repo_root)
     assert kept.returncode == 0
 
     time_seconds = float(duration_seconds) / 2.0
-    stripped_frame = extract_raw_frame(output_path, time_seconds)
+    default_frame = extract_raw_frame(output_path, time_seconds)
     kept_frame = extract_raw_frame(output_path_keep, time_seconds)
-    assert stripped_frame != kept_frame
+    assert default_frame != kept_frame
 
 
 def test_background_image_derives_dimensions(tmp_path: Path) -> None:

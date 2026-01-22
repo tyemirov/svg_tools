@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -31,14 +32,17 @@ from domain.text_video import (
     INPUT_FILE_CODE,
     INVALID_CONFIG_CODE,
     INVALID_COLOR_CODE,
+    SubtitleRenderer,
     RenderConfig,
     RenderValidationError,
     SubtitleWindow,
     SRT_TIME_RANGE_PATTERN,
+    parse_subtitle_renderer,
     tokenize_words,
+    split_trailing_punctuation,
     parse_srt,
 )
-from service.render_plan import RenderPlan, build_render_plan
+from service.render_plan import RenderPlan, build_render_plan, build_rsvp_render_plan
 
 
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")
@@ -53,6 +57,18 @@ LETTER_ORDER_BY_DIRECTION = {
 LETTER_STAGGER_RATIO = 0.3
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
+RSVP_ANCHOR_X_RATIO = 0.50
+RSVP_ANCHOR_Y_RATIO = 0.80
+RSVP_FONT_RATIO = 0.060
+RSVP_FONT_MIN = 28
+RSVP_FONT_MAX = 96
+RSVP_STROKE_RATIO = 0.10
+RSVP_STROKE_MIN = 2
+RSVP_STROKE_MAX = 10
+RSVP_MARGIN_RATIO = 0.60
+RSVP_BASE_COLOR = (235, 235, 235, 255)
+RSVP_HIGHLIGHT_COLOR = (255, 255, 255, 255)
+RSVP_STROKE_COLOR = (0, 0, 0, 255)
 LOGGER = logging.getLogger("render_text_video")
 
 FFMPEG_NOT_FOUND_CODE = "render_text_video.ffmpeg.not_found"
@@ -97,6 +113,23 @@ class LetterToken:
     text: str
     bbox: Tuple[int, int, int, int]
     image: Image.Image
+
+
+@dataclass(frozen=True)
+class RsvpToken:
+    """Pre-rendered RSVP word sprite and layout data."""
+
+    text: str
+    word_core: str
+    orp_index: int
+    prefix_width: float
+    orp_width: float
+    anchor_x: float
+    anchor_y: float
+    base_image: Image.Image
+    base_offset: Tuple[int, int]
+    orp_image: Image.Image
+    orp_offset: Tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -263,8 +296,10 @@ def select_font_sizes(
     word_count: int, config: RenderConfig, rng: random.Random
 ) -> Tuple[int, ...]:
     """Select randomized font sizes for each word."""
-    min_size, max_size = compute_font_size_range(config.width, config.height)
-    return tuple(rng.randint(min_size, max_size) for _ in range(word_count))
+    return tuple(
+        rng.randint(config.font_size_min, config.font_size_max)
+        for _ in range(word_count)
+    )
 
 
 def load_font_cached(
@@ -349,6 +384,178 @@ def build_tokens(
                 letters=letters,
             )
         )
+    return tokens
+
+
+def clamp_int(value: int, min_value: int, max_value: int) -> int:
+    """Clamp an integer between min and max."""
+    return max(min_value, min(max_value, value))
+
+
+def compute_rsvp_font_size(frame_height: int) -> int:
+    """Compute RSVP font size based on frame height."""
+    return clamp_int(
+        int(round(frame_height * RSVP_FONT_RATIO)), RSVP_FONT_MIN, RSVP_FONT_MAX
+    )
+
+
+def compute_rsvp_stroke_width(font_size: int) -> int:
+    """Compute RSVP stroke width based on font size."""
+    return clamp_int(
+        int(round(font_size * RSVP_STROKE_RATIO)),
+        RSVP_STROKE_MIN,
+        RSVP_STROKE_MAX,
+    )
+
+
+def compute_rsvp_margin(font_size: int) -> int:
+    """Compute RSVP margin based on font size."""
+    return int(round(font_size * RSVP_MARGIN_RATIO))
+
+
+def compute_orp_index(word_core: str) -> int:
+    """Compute the ORP index for a word core."""
+    if len(word_core) <= 1:
+        return 0
+    return max(0, int(math.floor(len(word_core) * 0.35) - 1))
+
+
+def measure_text_width(
+    draw_context: ImageDraw.ImageDraw,
+    text_value: str,
+    font: ImageFont.FreeTypeFont,
+) -> float:
+    """Measure text width using font metrics."""
+    if not text_value:
+        return 0.0
+    try:
+        return float(draw_context.textlength(text_value, font=font))
+    except Exception:
+        bbox = draw_context.textbbox((0, 0), text_value, font=font)
+        return float(bbox[2] - bbox[0])
+
+
+def measure_text_bbox(
+    draw_context: ImageDraw.ImageDraw,
+    text_value: str,
+    font: ImageFont.FreeTypeFont,
+    stroke_width: int,
+) -> Tuple[int, int, int, int]:
+    """Measure text bounding box relative to a left baseline anchor."""
+    return draw_context.textbbox(
+        (0, 0),
+        text_value,
+        font=font,
+        stroke_width=stroke_width,
+        anchor="la",
+    )
+
+
+def render_text_sprite(
+    text_value: str,
+    font: ImageFont.FreeTypeFont,
+    fill_rgba: Tuple[int, int, int, int],
+    stroke_rgba: Tuple[int, int, int, int],
+    stroke_width: int,
+    draw_context: ImageDraw.ImageDraw,
+) -> Tuple[Image.Image, Tuple[int, int]]:
+    """Render a text sprite and return the image plus its anchor offset."""
+    left, top, right, bottom = measure_text_bbox(
+        draw_context, text_value, font, stroke_width
+    )
+    sprite_width = max(1, right - left)
+    sprite_height = max(1, bottom - top)
+    sprite = Image.new("RGBA", (sprite_width, sprite_height), (0, 0, 0, 0))
+    sprite_draw = ImageDraw.Draw(sprite)
+    sprite_draw.text(
+        (-left, -top),
+        text_value,
+        font=font,
+        fill=fill_rgba,
+        stroke_width=stroke_width,
+        stroke_fill=stroke_rgba,
+        anchor="la",
+    )
+    return sprite, (left, top)
+
+
+def build_rsvp_tokens(
+    words: Sequence[str],
+    config: RenderConfig,
+) -> list[RsvpToken]:
+    """Create RSVP tokens with ORP anchoring."""
+    font_size = compute_rsvp_font_size(config.height)
+    stroke_width = compute_rsvp_stroke_width(font_size)
+    margin_px = compute_rsvp_margin(font_size)
+    font_files = list_font_files(config.fonts_dir)
+    font_files = filter_loadable_fonts(font_files, font_size)
+    font_value = load_font_cached(font_files[0], font_size, {})
+
+    layout_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    anchor_x = config.width * RSVP_ANCHOR_X_RATIO
+    anchor_y = config.height * RSVP_ANCHOR_Y_RATIO
+
+    tokens: list[RsvpToken] = []
+    for word_text in words:
+        word_core, _ = split_trailing_punctuation(word_text)
+        orp_index = compute_orp_index(word_core)
+        prefix = word_core[:orp_index]
+        orp_char = word_core[orp_index]
+        orp_advance = measure_text_width(layout_draw, orp_char, font_value)
+        if prefix:
+            prefix_width = (
+                measure_text_width(layout_draw, prefix + orp_char, font_value)
+                - orp_advance
+            )
+        else:
+            prefix_width = 0.0
+        orp_left, _, orp_right, _ = measure_text_bbox(
+            layout_draw, orp_char, font_value, stroke_width
+        )
+        orp_width = float(orp_right - orp_left)
+        text_left, _, text_right, _ = measure_text_bbox(
+            layout_draw, word_text, font_value, stroke_width
+        )
+        orp_center_offset = orp_left + (orp_width / 2.0)
+        x_anchor = anchor_x - prefix_width - orp_center_offset
+        min_anchor = margin_px - text_left
+        max_anchor = config.width - margin_px - text_right
+        if min_anchor <= max_anchor:
+            x_anchor = min(max(x_anchor, min_anchor), max_anchor)
+
+        base_image, base_offset = render_text_sprite(
+            word_text,
+            font_value,
+            RSVP_BASE_COLOR,
+            RSVP_STROKE_COLOR,
+            stroke_width,
+            layout_draw,
+        )
+        orp_image, orp_offset = render_text_sprite(
+            orp_char,
+            font_value,
+            RSVP_HIGHLIGHT_COLOR,
+            RSVP_STROKE_COLOR,
+            stroke_width,
+            layout_draw,
+        )
+
+        tokens.append(
+            RsvpToken(
+                text=word_text,
+                word_core=word_core,
+                orp_index=orp_index,
+                prefix_width=prefix_width,
+                orp_width=orp_width,
+                anchor_x=x_anchor,
+                anchor_y=anchor_y,
+                base_image=base_image,
+                base_offset=base_offset,
+                orp_image=orp_image,
+                orp_offset=orp_offset,
+            )
+        )
+
     return tokens
 
 
@@ -707,7 +914,10 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
 
 
 def build_subtitle_windows(
-    config: RenderConfig, text_value: str, remove_punctuation: bool
+    config: RenderConfig,
+    text_value: str,
+    remove_punctuation: bool,
+    subtitle_renderer: SubtitleRenderer,
 ) -> Tuple[SubtitleWindow, ...]:
     """Build subtitle windows from plain text or SRT input."""
     is_srt_extension = config.input_text_file.lower().endswith(".srt")
@@ -716,6 +926,15 @@ def build_subtitle_windows(
         for line in text_value.splitlines()
         if line.strip()
     )
+
+    if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
+        if not (is_srt_extension or is_srt_content):
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "rsvp_orp requires SRT input",
+            )
+        return parse_srt(text_value, remove_punctuation)
+
     if is_srt_extension or is_srt_content:
         return parse_srt(text_value, remove_punctuation)
 
@@ -734,7 +953,15 @@ def build_render_plan_from_input(
 ) -> RenderPlan:
     """Load input text and build a render plan."""
     input_text = read_utf8_text_strict(config.input_text_file)
-    windows = build_subtitle_windows(config, input_text, remove_punctuation)
+    windows = build_subtitle_windows(
+        config, input_text, remove_punctuation, config.subtitle_renderer
+    )
+    if config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
+        return build_rsvp_render_plan(
+            windows=windows,
+            fps=config.fps,
+            duration_seconds=config.duration_seconds,
+        )
     return build_render_plan(
         windows=windows,
         fps=config.fps,
@@ -903,6 +1130,91 @@ def render_video(
             pass
 
 
+def render_rsvp_video(
+    config: RenderConfig,
+    plan: RenderPlan,
+    tokens: Sequence[RsvpToken],
+    background_image: Image.Image | None,
+) -> None:
+    """Render frames for RSVP subtitles."""
+    ffmpeg_process = open_ffmpeg_process(config)
+    if not ffmpeg_process.stdin:
+        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
+
+    schedule_index = 0
+    current_schedule = None
+    current_token_index: int | None = None
+    current_token: RsvpToken | None = None
+
+    try:
+        for frame_index in range(plan.total_frames):
+            if schedule_index < len(plan.scheduled_words):
+                schedule = plan.scheduled_words[schedule_index]
+                schedule_end = schedule.start_frame + schedule.frame_count
+                if frame_index >= schedule_end:
+                    schedule_index += 1
+                    current_schedule = None
+                    current_token_index = None
+                    current_token = None
+                if schedule_index < len(plan.scheduled_words):
+                    schedule = plan.scheduled_words[schedule_index]
+                    if frame_index >= schedule.start_frame:
+                        current_schedule = schedule
+
+            if background_image is None:
+                frame_image = Image.new(
+                    "RGBA", (config.width, config.height), color=config.background_rgba
+                )
+            else:
+                frame_image = background_image.copy()
+
+            if current_schedule is not None:
+                token_index = current_schedule.token_index
+                if token_index != current_token_index:
+                    current_token_index = token_index
+                    current_token = tokens[token_index]
+                token = current_token
+                if token is None:
+                    raise RenderPipelineError(
+                        FFMPEG_PROCESS_CODE, "render token missing"
+                    )
+                base_x = int(round(token.anchor_x + token.base_offset[0]))
+                base_y = int(round(token.anchor_y + token.base_offset[1]))
+                frame_image.paste(
+                    token.base_image, (base_x, base_y), token.base_image
+                )
+
+                orp_anchor_x = token.anchor_x + token.prefix_width
+                orp_x = int(round(orp_anchor_x + token.orp_offset[0]))
+                orp_y = int(round(token.anchor_y + token.orp_offset[1]))
+                frame_image.paste(token.orp_image, (orp_x, orp_y), token.orp_image)
+
+            ffmpeg_process.stdin.write(frame_image.tobytes())
+
+        ffmpeg_process.stdin.close()
+        stderr_bytes = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else b""
+        return_code = ffmpeg_process.wait()
+
+        if return_code != 0:
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE,
+                f"ffmpeg failed with exit code {return_code}. {stderr_text}",
+            )
+
+    finally:
+        try:
+            if ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
+                ffmpeg_process.stdin.close()
+        except Exception:
+            pass
+        try:
+            if ffmpeg_process.poll() is None:
+                ffmpeg_process.kill()
+        except Exception:
+            pass
+
+
 def parse_args(argv: Sequence[str]) -> RenderRequest:
     """Parse CLI arguments into a RenderRequest."""
     parser = argparse.ArgumentParser(prog="render_text_video.py", add_help=True)
@@ -919,11 +1231,39 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     parser.add_argument("--fonts-dir", default="fonts")
     parser.add_argument("--direction-seed", type=int, default=None)
     parser.add_argument("--emit-directions", action="store_true")
-    parser.add_argument("--remove-punctuation", action="store_true")
+    punctuation_group = parser.add_mutually_exclusive_group()
+    punctuation_group.add_argument("--remove-punctuation", action="store_true")
+    punctuation_group.add_argument("--keep-punctuation", action="store_true")
+    parser.add_argument("--subtitle-renderer", default="motion")
+    parser.add_argument("--font-min", type=int, default=None)
+    parser.add_argument("--font-max", type=int, default=None)
 
     parsed = parser.parse_args(argv)
+    subtitle_renderer = parse_subtitle_renderer(parsed.subtitle_renderer)
+    remove_punctuation = not parsed.keep_punctuation
     background_rgba = parse_hex_color_to_rgba(parsed.background)
     background_image = None
+
+    if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
+        if parsed.direction_seed is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "direction-seed is not supported for rsvp_orp"
+            )
+        if parsed.emit_directions:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "emit-directions is not supported for rsvp_orp"
+            )
+        if parsed.font_min is not None or parsed.font_max is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "font-min/font-max are not supported for rsvp_orp",
+            )
+    elif subtitle_renderer != SubtitleRenderer.CRISS_CROSS:
+        if parsed.font_min is not None or parsed.font_max is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "font-min/font-max require subtitle-renderer criss_cross",
+            )
 
     if parsed.background_image:
         if parsed.width is not None or parsed.height is not None:
@@ -942,6 +1282,16 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         width = parsed.width
         height = parsed.height
 
+    min_font_size, max_font_size = compute_font_size_range(width, height)
+    if parsed.font_min is not None:
+        min_font_size = parsed.font_min
+    if parsed.font_max is not None:
+        max_font_size = parsed.font_max
+    if min_font_size > max_font_size:
+        raise RenderValidationError(
+            INVALID_CONFIG_CODE, "font-min exceeds font-max"
+        )
+
     config = RenderConfig(
         input_text_file=parsed.input_text_file,
         output_video_file=parsed.output_video_file,
@@ -952,13 +1302,16 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         background_rgba=background_rgba,
         fonts_dir=parsed.fonts_dir,
         background_image_path=parsed.background_image,
+        subtitle_renderer=subtitle_renderer,
+        font_size_min=min_font_size,
+        font_size_max=max_font_size,
     )
 
     return RenderRequest(
         config=config,
         direction_seed=parsed.direction_seed,
         emit_directions=parsed.emit_directions,
-        remove_punctuation=parsed.remove_punctuation,
+        remove_punctuation=remove_punctuation,
         background_image=background_image,
     )
 
@@ -1019,6 +1372,13 @@ def main() -> int:
         plan = build_render_plan_from_input(
             request.config, request.remove_punctuation
         )
+        if request.config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
+            tokens = build_rsvp_tokens(plan.words, request.config)
+            validate_ffmpeg_capabilities()
+            render_rsvp_video(
+                request.config, plan, tokens, request.background_image
+            )
+            return 0
         rng = random.Random(request.direction_seed)
         directions = select_directions(len(plan.words), rng)
         font_sizes = select_font_sizes(len(plan.words), request.config, rng)
