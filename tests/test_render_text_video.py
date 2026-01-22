@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import struct
@@ -961,6 +962,103 @@ def test_rsvp_orp_punctuation_pause_extends_word(tmp_path: Path) -> None:
     assert counts[words[0]] == base_frames + pause_frames
     assert counts[words[1]] == base_frames
     assert counts[words[0]] + counts[words[1]] == total_frames
+
+
+def test_font_bounds_require_criss_cross_renderer(tmp_path: Path) -> None:
+    """Reject font bounds unless criss_cross renderer is selected."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta gamma"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(["--font-min", "40"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
+
+
+def test_font_bounds_apply_for_criss_cross(tmp_path: Path) -> None:
+    """Apply font bounds when criss_cross renderer is used."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta gamma"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(
+        [
+            "--subtitle-renderer",
+            "criss_cross",
+            "--font-min",
+            "40",
+            "--font-max",
+            "50",
+            "--emit-directions",
+        ]
+    )
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    sizes = payload["font_sizes"]
+    assert sizes
+    assert all(40 <= size <= 50 for size in sizes)
+
+
+def test_font_bounds_invalid_range_fails(tmp_path: Path) -> None:
+    """Reject invalid font bounds where min exceeds max."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = repo_root / "assets" / "fonts"
+
+    input_text = "alpha beta"
+    input_path = tmp_path / "words.txt"
+    input_path.write_text(input_text, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.9",
+        fps="6",
+    )
+    args.extend(
+        [
+            "--subtitle-renderer",
+            "criss_cross",
+            "--font-min",
+            "60",
+            "--font-max",
+            "20",
+        ]
+    )
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_config" in result.stderr
 
 
 def test_remove_punctuation(tmp_path: Path) -> None:

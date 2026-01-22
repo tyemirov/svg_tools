@@ -38,6 +38,7 @@ class SubtitleRenderer(str, Enum):
     """Supported subtitle render modes."""
 
     MOTION = "motion"
+    CRISS_CROSS = "criss_cross"
     RSVP_ORP = "rsvp_orp"
 
 
@@ -55,6 +56,8 @@ class RenderConfig:
     fonts_dir: str
     background_image_path: str | None
     subtitle_renderer: SubtitleRenderer
+    font_size_min: int
+    font_size_max: int
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -85,6 +88,18 @@ class RenderConfig:
         if not isinstance(self.subtitle_renderer, SubtitleRenderer):
             raise RenderValidationError(
                 INVALID_RENDERER_CODE, "subtitle_renderer is invalid"
+            )
+        if self.font_size_min <= 0:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font_size_min must be positive"
+            )
+        if self.font_size_max <= 0:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font_size_max must be positive"
+            )
+        if self.font_size_min > self.font_size_max:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font_size_min exceeds font_size_max"
             )
 
 

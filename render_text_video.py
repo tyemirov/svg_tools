@@ -296,8 +296,10 @@ def select_font_sizes(
     word_count: int, config: RenderConfig, rng: random.Random
 ) -> Tuple[int, ...]:
     """Select randomized font sizes for each word."""
-    min_size, max_size = compute_font_size_range(config.width, config.height)
-    return tuple(rng.randint(min_size, max_size) for _ in range(word_count))
+    return tuple(
+        rng.randint(config.font_size_min, config.font_size_max)
+        for _ in range(word_count)
+    )
 
 
 def load_font_cached(
@@ -1231,6 +1233,8 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     parser.add_argument("--emit-directions", action="store_true")
     parser.add_argument("--remove-punctuation", action="store_true")
     parser.add_argument("--subtitle-renderer", default="motion")
+    parser.add_argument("--font-min", type=int, default=None)
+    parser.add_argument("--font-max", type=int, default=None)
 
     parsed = parser.parse_args(argv)
     subtitle_renderer = parse_subtitle_renderer(parsed.subtitle_renderer)
@@ -1251,6 +1255,17 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
                 INVALID_CONFIG_CODE,
                 "remove-punctuation is not supported for rsvp_orp",
             )
+        if parsed.font_min is not None or parsed.font_max is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "font-min/font-max are not supported for rsvp_orp",
+            )
+    elif subtitle_renderer != SubtitleRenderer.CRISS_CROSS:
+        if parsed.font_min is not None or parsed.font_max is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE,
+                "font-min/font-max require subtitle-renderer criss_cross",
+            )
 
     if parsed.background_image:
         if parsed.width is not None or parsed.height is not None:
@@ -1269,6 +1284,16 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         width = parsed.width
         height = parsed.height
 
+    min_font_size, max_font_size = compute_font_size_range(width, height)
+    if parsed.font_min is not None:
+        min_font_size = parsed.font_min
+    if parsed.font_max is not None:
+        max_font_size = parsed.font_max
+    if min_font_size > max_font_size:
+        raise RenderValidationError(
+            INVALID_CONFIG_CODE, "font-min exceeds font-max"
+        )
+
     config = RenderConfig(
         input_text_file=parsed.input_text_file,
         output_video_file=parsed.output_video_file,
@@ -1280,6 +1305,8 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         fonts_dir=parsed.fonts_dir,
         background_image_path=parsed.background_image,
         subtitle_renderer=subtitle_renderer,
+        font_size_min=min_font_size,
+        font_size_max=max_font_size,
     )
 
     return RenderRequest(
