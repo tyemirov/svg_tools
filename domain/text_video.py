@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import re
 import unicodedata
 from typing import Tuple
@@ -16,11 +17,13 @@ INPUT_FILE_CODE = "render_text_video.input.file_error"
 FONT_DIR_CODE = "render_text_video.input.fonts_missing"
 FONT_LOAD_CODE = "render_text_video.input.fonts_unloadable"
 BACKGROUND_IMAGE_CODE = "render_text_video.input.background_image"
+INVALID_RENDERER_CODE = "render_text_video.input.invalid_renderer"
 
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2},\d{3})$"
 )
 SRT_TIMECODE_PATTERN = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})$")
+TRAILING_PUNCTUATION = ".,!?:;"
 
 
 class RenderValidationError(ValueError):
@@ -29,6 +32,14 @@ class RenderValidationError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class SubtitleRenderer(str, Enum):
+    """Supported subtitle render modes."""
+
+    MOTION = "motion"
+    CRISS_CROSS = "criss_cross"
+    RSVP_ORP = "rsvp_orp"
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,9 @@ class RenderConfig:
     background_rgba: Tuple[int, int, int, int]
     fonts_dir: str
     background_image_path: str | None
+    subtitle_renderer: SubtitleRenderer
+    font_size_min: int
+    font_size_max: int
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -70,6 +84,22 @@ class RenderConfig:
         if self.background_image_path is not None and not self.background_image_path.strip():
             raise RenderValidationError(
                 INVALID_CONFIG_CODE, "background_image_path must be non-empty"
+            )
+        if not isinstance(self.subtitle_renderer, SubtitleRenderer):
+            raise RenderValidationError(
+                INVALID_RENDERER_CODE, "subtitle_renderer is invalid"
+            )
+        if self.font_size_min <= 0:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font_size_min must be positive"
+            )
+        if self.font_size_max <= 0:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font_size_max must be positive"
+            )
+        if self.font_size_min > self.font_size_max:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font_size_min exceeds font_size_max"
             )
 
 
@@ -105,6 +135,14 @@ def strip_punctuation(text_value: str) -> str:
     )
 
 
+def split_trailing_punctuation(token: str) -> Tuple[str, str]:
+    """Split a token into its core and trailing punctuation."""
+    stripped = token.rstrip(TRAILING_PUNCTUATION)
+    if not stripped:
+        return token, ""
+    return stripped, token[len(stripped) :]
+
+
 def tokenize_words(text_value: str, remove_punctuation: bool) -> Tuple[str, ...]:
     """Split text into whitespace-delimited words."""
     stripped_text = text_value.replace("\ufeff", "").strip()
@@ -133,6 +171,17 @@ def parse_timecode(timecode_value: str) -> float:
         )
     hours, minutes, seconds, millis = (int(part) for part in match.groups())
     return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+
+
+def parse_subtitle_renderer(value: str) -> SubtitleRenderer:
+    """Parse a subtitle renderer name into a SubtitleRenderer."""
+    normalized = value.strip().lower()
+    try:
+        return SubtitleRenderer(normalized)
+    except ValueError as exc:
+        raise RenderValidationError(
+            INVALID_RENDERER_CODE, f"invalid subtitle renderer: {value!r}"
+        ) from exc
 
 
 def parse_srt(text_value: str, remove_punctuation: bool) -> Tuple[SubtitleWindow, ...]:
