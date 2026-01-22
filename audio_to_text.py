@@ -5,6 +5,7 @@
 #   "whisperx==3.3.0",
 #   "matplotlib<4",
 #   "numpy<2",
+#   "safetensors",
 # ]
 # ///
 """Force-align audio or video to input text and emit SRT."""
@@ -101,6 +102,10 @@ DEFAULT_UI_PORT = 7860
 MAX_PORT = 65535
 TORCH_MIN_VERSION = (2, 6)
 TORCH_MIN_VERSION_TEXT = "2.6"
+TORCHAUDIO_ALIGNMENT_LANGUAGES = {"en", "fr", "de", "es", "it"}
+ALIGNMENT_MODEL_OVERRIDES = {
+    "ru": "UrukHan/wav2vec2-russian",
+}
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}$"
 )
@@ -500,12 +505,18 @@ def load_alignment_model(
     language: str, device: str
 ) -> tuple[object, dict[str, object]]:
     """Load the alignment model and metadata."""
-    torch_module = load_torch_module()
-    ensure_torch_version(torch_module, language)
+    model_name = ALIGNMENT_MODEL_OVERRIDES.get(language)
+    if (
+        language not in TORCHAUDIO_ALIGNMENT_LANGUAGES
+        and model_name is None
+    ):
+        torch_module = load_torch_module()
+        ensure_torch_version(torch_module, language)
     try:
         return whisperx.load_align_model(
             language_code=language,
             device=device,
+            model_name=model_name,
         )
     except Exception as exc:
         raise AlignmentPipelineError(

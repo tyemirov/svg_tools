@@ -274,7 +274,7 @@ Force-align audio or video to a provided transcript and emit an SRT with word-le
 The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
 
 **Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
-**Torch requirement:** Hugging Face alignment models stored as `.bin` require torch >= 2.6.
+**Torch requirement:** Hugging Face alignment models stored as `.bin` require torch >= 2.6; torchaudio-backed languages and safetensors-backed overrides (for example Russian) can run on older torch versions.
 
 ---
 
