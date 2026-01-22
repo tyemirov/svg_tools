@@ -41,6 +41,11 @@ def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.Comple
     )
 
 
+def get_test_fonts_dir(repo_root: Path) -> Path:
+    """Return the fonts directory for tests."""
+    return repo_root / "tests" / "fixtures" / "fonts"
+
+
 def extract_raw_frame(video_path: Path, time_seconds: float) -> bytes:
     """Extract a raw RGBA frame from a video at the requested time."""
     result = subprocess.run(
@@ -368,7 +373,7 @@ def test_srt_window_too_small(tmp_path: Path) -> None:
     """Fail when an SRT window is too short for its words."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     srt_content = """1\n00:00:00,000 --> 00:00:00,200\nalpha beta gamma delta\n"""
     srt_path = tmp_path / "short.srt"
@@ -394,7 +399,7 @@ def test_srt_success(tmp_path: Path) -> None:
     """Render a short SRT successfully."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     srt_content = """1\n00:00:00,000 --> 00:00:00,400\nhello world\n\n2\n00:00:00,400 --> 00:00:00,800\nsecond line\n"""
     srt_path = tmp_path / "ok.srt"
@@ -421,7 +426,7 @@ def test_direction_seed_is_deterministic(tmp_path: Path) -> None:
     """Use a seed to make direction selection deterministic."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha"
     input_path = tmp_path / "words.txt"
@@ -463,7 +468,7 @@ def test_l2r_cyrillic_word_is_reversed(tmp_path: Path) -> None:
     """Ensure L2R words lead with the first letter."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    source_font = get_test_fonts_dir(repo_root) / "NotoSans-Bold.ttf"
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     shutil.copy(source_font, fonts_dir / source_font.name)
@@ -549,7 +554,7 @@ def test_hard_first_letter_appears_first_entry_directions(tmp_path: Path) -> Non
     """Ensure HARD leads with H as the first visible letter where entry is leading."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    source_font = get_test_fonts_dir(repo_root) / "NotoSans-Bold.ttf"
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     shutil.copy(source_font, fonts_dir / source_font.name)
@@ -643,7 +648,7 @@ def test_b2t_word_is_natural_and_complete(tmp_path: Path) -> None:
     """Ensure B2T words are ordered naturally with all letters visible."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    source_font = get_test_fonts_dir(repo_root) / "NotoSans-Bold.ttf"
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     shutil.copy(source_font, fonts_dir / source_font.name)
@@ -739,7 +744,7 @@ def test_rsvp_orp_anchor_is_stable(tmp_path: Path) -> None:
     """Ensure RSVP ORP anchor stays stable across words."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    source_font = get_test_fonts_dir(repo_root) / "NotoSans-Bold.ttf"
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     shutil.copy(source_font, fonts_dir / source_font.name)
@@ -871,7 +876,7 @@ def test_rsvp_orp_punctuation_pause_extends_word(tmp_path: Path) -> None:
     """Ensure RSVP punctuation pauses extend the punctuated word."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    source_font = repo_root / "assets" / "fonts" / "NotoSans-Bold.ttf"
+    source_font = get_test_fonts_dir(repo_root) / "NotoSans-Bold.ttf"
     fonts_dir = tmp_path / "fonts"
     fonts_dir.mkdir()
     shutil.copy(source_font, fonts_dir / source_font.name)
@@ -968,7 +973,7 @@ def test_rsvp_orp_allows_long_window(tmp_path: Path) -> None:
     """Allow RSVP windows longer than max per-word timing."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     width = 240
     height = 180
@@ -1013,7 +1018,7 @@ def test_font_bounds_require_criss_cross_renderer(tmp_path: Path) -> None:
     """Reject font bounds unless criss_cross renderer is selected."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha beta gamma"
     input_path = tmp_path / "words.txt"
@@ -1038,7 +1043,7 @@ def test_font_bounds_apply_for_criss_cross(tmp_path: Path) -> None:
     """Apply font bounds when criss_cross renderer is used."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha beta gamma"
     input_path = tmp_path / "words.txt"
@@ -1076,7 +1081,7 @@ def test_font_bounds_invalid_range_fails(tmp_path: Path) -> None:
     """Reject invalid font bounds where min exceeds max."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha beta"
     input_path = tmp_path / "words.txt"
@@ -1110,7 +1115,7 @@ def test_remove_punctuation(tmp_path: Path) -> None:
     """Strip punctuation when requested."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "Hello, world! (Testing) punctuation... OK?"
     input_path = tmp_path / "words.txt"
@@ -1157,7 +1162,7 @@ def test_background_image_derives_dimensions(tmp_path: Path) -> None:
     """Use background image to derive frame dimensions."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha beta gamma delta"
     input_path = tmp_path / "words.txt"
@@ -1195,7 +1200,7 @@ def test_background_image_conflicts_with_dimensions(tmp_path: Path) -> None:
     """Fail when background image and dimensions are both provided."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha beta"
     input_path = tmp_path / "words.txt"
@@ -1223,7 +1228,7 @@ def test_requires_dimensions_without_background(tmp_path: Path) -> None:
     """Fail when no dimensions or background image are provided."""
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "render_text_video.py"
-    fonts_dir = repo_root / "assets" / "fonts"
+    fonts_dir = get_test_fonts_dir(repo_root)
 
     input_text = "alpha beta"
     input_path = tmp_path / "words.txt"
