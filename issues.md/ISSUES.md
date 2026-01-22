@@ -188,6 +188,8 @@ proceed
 - [x] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status. Resolved with progress updates in job tracking and UI progress bar rendering.
 - [ ] [I117] Restrict audio_to_text language selection to supported alignment languages (dropdown only), remove custom model input, and avoid auto-detect.
 - [x] [I117] Restrict audio_to_text language selection to supported alignment languages (dropdown only), remove custom model input, and avoid auto-detect. Resolved with CLI/UI language validation, dropdown options, and docs/tests updates.
+- [ ] [I118] Add Linux-based Docker packaging for audio_to_text with dev/prod workflows and shared env file.
+- [x] [I118] Add Linux-based Docker packaging for audio_to_text with dev/prod workflows and shared env file. Resolved with multi-stage Dockerfiles, compose samples, and env example/docs.
 
 ## Tooling Baseline (I114)
 - `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).

@@ -276,6 +276,27 @@ The UI provides separate dropzones for audio/video and transcript text, runs ali
 **Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
 **Torch requirement:** Hugging Face alignment models stored as `.bin` require torch >= 2.6; torchaudio-backed languages and safetensors-backed overrides (for example Russian) can run on older torch versions.
 
+**Docker (Linux)**
+
+Create the shared env file:
+
+```shell
+cp .env.audio_to_text.example .env.audio_to_text
+```
+
+Development (bind-mounts the repo for local changes):
+
+```shell
+docker compose -f docker/audio_to_text/docker-compose.dev.yml up --build
+```
+
+Production (pull the newest base image before building):
+
+```shell
+docker compose -f docker/audio_to_text/docker-compose.prod.yml build --pull
+docker compose -f docker/audio_to_text/docker-compose.prod.yml up
+```
+
 ---
 
 ### `text_to_svg.py`

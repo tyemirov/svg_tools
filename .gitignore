@@ -17,6 +17,7 @@ coverage*.html
 # Managed by gix gitignore workflow
 .env
 .env.*
+!.env.audio_to_text.example
 .DS_Store
 qodana.yaml
 .idea/
