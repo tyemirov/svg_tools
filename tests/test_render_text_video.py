@@ -71,6 +71,36 @@ def extract_raw_frame(video_path: Path, time_seconds: float) -> bytes:
     return result.stdout
 
 
+def probe_video_stream(video_path: Path) -> dict[str, str]:
+    """Return codec metadata for the first video stream."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    streams = payload.get("streams", [])
+    assert streams, "no video streams found"
+    stream = streams[0]
+    return {
+        "codec_name": stream.get("codec_name", ""),
+        "pix_fmt": stream.get("pix_fmt", ""),
+    }
+
+
 def alpha_bbox(frame_bytes: bytes, width: int, height: int) -> tuple[int, int, int, int]:
     """Return the bounding box of non-transparent pixels."""
     min_x = width
@@ -1194,6 +1224,9 @@ def test_background_image_derives_dimensions(tmp_path: Path) -> None:
     assert result.returncode == 0
     frame_bytes = extract_raw_frame(output_path, float(duration_seconds) / 2.0)
     assert len(frame_bytes) == 10 * 12 * BYTES_PER_PIXEL
+    stream_info = probe_video_stream(output_path)
+    assert stream_info["codec_name"] == "h264"
+    assert stream_info["pix_fmt"] == "yuv420p"
 
 
 def test_background_image_conflicts_with_dimensions(tmp_path: Path) -> None:
