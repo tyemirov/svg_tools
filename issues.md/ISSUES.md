@@ -158,3 +158,5 @@ proceed
 - [x] [B315] Resolved CI font failures by tracking assets/fonts and updating .gitignore.
 - [ ] [B316] Replace asset font tracking with test fixtures to keep assets uncommitted and CI green.
 - [x] [B316] Resolved CI font fixture handling by moving fonts to tests/fixtures and restoring assets ignore.
+- [ ] [B317] Reduce alpha MOV size further for long background renders (20GB/100s) with a smaller alpha payload.
+- [x] [B317] Resolved alpha MOV size by scaling ProRes quantization with frame size and using 8-bit alpha, plus ffmpeg capability checks.

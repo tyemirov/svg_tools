@@ -78,7 +78,10 @@ FFMPEG_PROCESS_CODE = "render_text_video.ffmpeg.process_failed"
 INTERNAL_DIRECTION_CODE = "render_text_video.internal.invalid_direction"
 PRORES_PROFILE = "4444"
 PRORES_PIXEL_FORMAT = "yuva444p10le"
-PRORES_QSCALE = "15"
+PRORES_QSCALE_BASE = 15
+PRORES_QSCALE_MAX = 28
+PRORES_QSCALE_REFERENCE_PIXELS = 1920 * 1080
+PRORES_ALPHA_BITS = "8"
 
 
 class RenderPipelineError(RuntimeError):
@@ -871,6 +874,14 @@ def apply_letter_progress(base_progress: float, offset: float) -> float:
     return min(1.0, max(0.0, base_progress + offset))
 
 
+def compute_prores_qscale(width: int, height: int) -> int:
+    """Compute a ProRes quantizer based on the frame size."""
+    pixel_count = width * height
+    scale = pixel_count / PRORES_QSCALE_REFERENCE_PIXELS
+    qscale = int(round(PRORES_QSCALE_BASE * math.sqrt(scale)))
+    return max(PRORES_QSCALE_BASE, min(PRORES_QSCALE_MAX, qscale))
+
+
 def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
     """Start ffmpeg for a raw RGBA frame stream."""
     ensure_ffmpeg_available()
@@ -894,7 +905,9 @@ def open_ffmpeg_process(config: RenderConfig) -> subprocess.Popen[bytes]:
         "-profile:v",
         PRORES_PROFILE,
         "-qscale:v",
-        PRORES_QSCALE,
+        str(compute_prores_qscale(config.width, config.height)),
+        "-alpha_bits",
+        PRORES_ALPHA_BITS,
         "-pix_fmt",
         PRORES_PIXEL_FORMAT,
         "-movflags",
@@ -1347,6 +1360,19 @@ def validate_ffmpeg_capabilities() -> None:
         raise RenderPipelineError(
             FFMPEG_UNSUPPORTED_CODE,
             "ffmpeg does not support prores_ks encoder",
+        )
+
+    encoder_help = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-h", "encoder=prores_ks"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    if "alpha_bits" not in encoder_help.stdout:
+        raise RenderPipelineError(
+            FFMPEG_UNSUPPORTED_CODE,
+            "ffmpeg prores_ks encoder does not support alpha_bits",
         )
 
     pixfmts_result = subprocess.run(
