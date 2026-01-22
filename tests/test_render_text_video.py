@@ -1255,6 +1255,38 @@ def test_rsvp_orp_allows_short_window_best_effort(tmp_path: Path) -> None:
     assert output_path.exists()
 
 
+def test_rsvp_orp_allows_sub_frame_window(tmp_path: Path) -> None:
+    """Allow RSVP windows shorter than a single frame."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    width = 240
+    height = 180
+    duration_seconds = "0.2"
+    fps = "30"
+
+    srt_content = "1\n00:00:00,013 --> 00:00:00,015\nalpha\n"
+    input_path = tmp_path / "sub-frame.srt"
+    input_path.write_text(srt_content, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    args.extend(["--subtitle-renderer", "rsvp_orp"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    assert output_path.exists()
+
+
 def test_rsvp_orp_allows_long_window(tmp_path: Path) -> None:
     """Allow RSVP windows longer than max per-word timing."""
     repo_root = Path(__file__).resolve().parents[1]

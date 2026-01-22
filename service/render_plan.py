@@ -96,12 +96,9 @@ def build_render_plan(
     token_offset = 0
 
     for window in windows:
-        window_start_frame = int(round(window.start_seconds * fps))
-        window_end_frame = int(round(window.end_seconds * fps))
-        if window_end_frame <= window_start_frame:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window has no frames"
-            )
+        window_start_frame, window_end_frame = window_to_frames(
+            window.start_seconds, window.end_seconds, fps
+        )
         if window_start_frame < current_end_frame:
             raise RenderValidationError(
                 INVALID_WINDOW_CODE, "subtitle windows overlap"
@@ -142,6 +139,17 @@ def build_render_plan(
         words=tuple(words),
         scheduled_words=tuple(scheduled_words),
     )
+
+
+def window_to_frames(
+    start_seconds: float, end_seconds: float, fps: int
+) -> Tuple[int, int]:
+    """Convert subtitle window seconds to a non-empty frame range."""
+    start_frame = int(round(start_seconds * fps))
+    end_frame = int(round(end_seconds * fps))
+    if end_frame <= start_frame:
+        end_frame = start_frame + 1
+    return start_frame, end_frame
 
 
 def ms_to_frames_ceil(milliseconds: float, fps: int) -> int:
@@ -269,12 +277,9 @@ def build_rsvp_render_plan(
     token_offset = 0
 
     for window in windows:
-        window_start_frame = int(round(window.start_seconds * fps))
-        window_end_frame = int(round(window.end_seconds * fps))
-        if window_end_frame <= window_start_frame:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window has no frames"
-            )
+        window_start_frame, window_end_frame = window_to_frames(
+            window.start_seconds, window.end_seconds, fps
+        )
         if window_end_frame > total_frames:
             raise RenderValidationError(
                 INVALID_WINDOW_CODE, "subtitle window exceeds duration"

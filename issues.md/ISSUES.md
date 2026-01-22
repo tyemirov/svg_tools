@@ -185,3 +185,8 @@ proceed
 
 ## Tooling Baseline (I114)
 - `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).
+
+## BugFixes Addendum (300–399)
+
+- [ ] [B324] Fix render_text_video RSVP windows that are shorter than one frame to avoid "subtitle window has no frames" errors.
+- [x] [B324] Fix render_text_video RSVP windows that are shorter than one frame to avoid "subtitle window has no frames" errors. Resolved with non-empty window frame conversion and RSVP integration coverage.
