@@ -24,6 +24,7 @@ import platform
 import re
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
 from types import ModuleType
-from typing import BinaryIO, Iterable, Sequence
+from typing import BinaryIO, Callable, Iterable, Sequence
 from urllib.parse import urlparse
 
 
@@ -58,7 +59,10 @@ PLATFORM_CODE = "audio_to_text.dependency.platform"
 UI_STORAGE_CODE = "audio_to_text.ui.storage"
 UI_UPLOAD_CODE = "audio_to_text.ui.upload.invalid"
 UI_UPLOAD_BODY_CODE = "audio_to_text.ui.upload.body"
+INVALID_JOB_INPUT_CODE = "audio_to_text.job.invalid_input"
+INVALID_JOB_RESULT_CODE = "audio_to_text.job.invalid_result"
 INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
+OUTPUT_SRT_METADATA_CODE = "audio_to_text.output.invalid_metadata"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
     DEVICE_AUTO: "Auto (GPU if available)",
@@ -112,9 +116,16 @@ MAX_PORT = 65535
 TORCH_MIN_VERSION = (2, 6)
 TORCH_MIN_VERSION_TEXT = "2.6"
 TORCHAUDIO_ALIGNMENT_LANGUAGES = {"en", "fr", "de", "es", "it"}
-ALIGNMENT_MODEL_OVERRIDES = {
-    "ru": "UrukHan/wav2vec2-russian",
+ALIGNMENT_PROGRESS_START = 0.45
+ALIGNMENT_PROGRESS_MAX = 0.84
+ALIGNMENT_PROGRESS_INTERVAL_SECONDS = 0.5
+ALIGNMENT_MIN_SECONDS = 3.0
+ALIGNMENT_TIME_SCALE = {
+    "cpu": 1.25,
+    "cuda": 0.75,
 }
+DEFAULT_ALIGNMENT_TIME_SCALE = 1.0
+SSE_KEEPALIVE_SECONDS = 5.0
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}$"
 )
@@ -232,6 +243,24 @@ class AlignedWord:
 
 
 @dataclass(frozen=True)
+class SrtMetadata:
+    """Metadata to embed in generated SRT files."""
+
+    audio_filename: str
+    text_filename: str
+
+    def __post_init__(self) -> None:
+        if not self.audio_filename.strip():
+            raise AlignmentPipelineError(
+                OUTPUT_SRT_METADATA_CODE, "audio filename is required"
+            )
+        if not self.text_filename.strip():
+            raise AlignmentPipelineError(
+                OUTPUT_SRT_METADATA_CODE, "text filename is required"
+            )
+
+
+@dataclass(frozen=True)
 class UiDefaults:
     """Default configuration values for the UI."""
 
@@ -272,20 +301,130 @@ class UploadForm:
 
 
 @dataclass(frozen=True)
-class AlignmentJob:
-    """State snapshot for a background alignment job."""
+class AlignmentJobInput:
+    """Captured inputs for a background alignment job."""
 
-    job_id: str
+    audio_filename: str
+    text_filename: str
+    language: str
+    device: str
+    audio_path: str
+    text_path: str
+    output_path: str
+
+    def __post_init__(self) -> None:
+        if not self.audio_filename.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "audio filename is required"
+            )
+        if not self.text_filename.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "text filename is required"
+            )
+        if not self.language.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "language is required"
+            )
+        if not self.device.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "device is required"
+            )
+        if not self.audio_path.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "audio path is required"
+            )
+        if not self.text_path.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "text path is required"
+            )
+        if not self.output_path.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "output path is required"
+            )
+
+
+@dataclass(frozen=True)
+class AlignmentJobResult:
+    """Outcome and progress for an alignment job."""
+
     status: JobStatus
     message: str | None
     output_srt: str | None
     progress: float
+    started_at: float | None
+    completed_at: float | None
 
     def __post_init__(self) -> None:
         if self.progress < 0.0 or self.progress > 1.0:
             raise AlignmentPipelineError(
                 INVALID_PROGRESS_CODE,
                 f"progress must be between 0 and 1: {self.progress}",
+            )
+        if self.started_at is not None and self.started_at < 0:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "started_at must be non-negative"
+            )
+        if self.completed_at is not None and self.completed_at < 0:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "completed_at must be non-negative"
+            )
+        if (
+            self.started_at is not None
+            and self.completed_at is not None
+            and self.completed_at < self.started_at
+        ):
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE,
+                "completed_at must be after started_at",
+            )
+        if self.status == JobStatus.QUEUED:
+            if self.started_at is not None or self.completed_at is not None:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    "queued jobs cannot have timestamps",
+                )
+        if self.status == JobStatus.RUNNING:
+            if self.started_at is None or self.completed_at is not None:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    "running jobs must have started_at and no completed_at",
+                )
+        if self.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            if self.started_at is None or self.completed_at is None:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    "completed jobs must have start and completion times",
+                )
+        if self.output_srt is not None and self.status != JobStatus.COMPLETED:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE,
+                "output path is only valid for completed jobs",
+            )
+        if self.status == JobStatus.COMPLETED and self.output_srt is None:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE,
+                "completed jobs must include output path",
+            )
+
+
+@dataclass(frozen=True)
+class AlignmentJob:
+    """State snapshot for a background alignment job."""
+
+    job_id: str
+    created_at: float
+    job_input: AlignmentJobInput
+    result: AlignmentJobResult
+
+    def __post_init__(self) -> None:
+        if not self.job_id:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "job id is required"
+            )
+        if self.created_at < 0:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE,
+                "job created_at must be non-negative",
             )
 
 
@@ -294,21 +433,58 @@ class JobStore:
     """Thread-safe store for background UI jobs."""
 
     root_dir: Path
+    clock: Callable[[], float]
+    id_factory: Callable[[], str]
     jobs: dict[str, AlignmentJob] = field(default_factory=dict)
+    job_order: list[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    condition: threading.Condition = field(init=False)
+    change_id: int = 0
 
-    def create_job(self) -> AlignmentJob:
+    def __post_init__(self) -> None:
+        self.condition = threading.Condition(self.lock)
+
+    def new_job_id(self) -> str:
+        """Generate a new job id."""
+        return self.id_factory()
+
+    def create_job(
+        self,
+        job_id: str,
+        job_input: AlignmentJobInput,
+    ) -> AlignmentJob:
         """Create a new queued job."""
-        job_id = uuid.uuid4().hex
-        job = AlignmentJob(job_id, JobStatus.QUEUED, None, None, 0.0)
-        with self.lock:
+        initial_result = AlignmentJobResult(
+            status=JobStatus.QUEUED,
+            message="Queued",
+            output_srt=None,
+            progress=0.0,
+            started_at=None,
+            completed_at=None,
+        )
+        created_at = self.clock()
+        job = AlignmentJob(job_id, created_at, job_input, initial_result)
+        with self.condition:
+            if job_id in self.jobs:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    f"job already exists: {job_id}",
+                )
             self.jobs[job_id] = job
+            self.job_order.append(job_id)
+            self.change_id += 1
+            self.condition.notify_all()
         return job
 
     def get_job(self, job_id: str) -> AlignmentJob | None:
         """Fetch a job by ID."""
         with self.lock:
             return self.jobs.get(job_id)
+
+    def list_jobs(self) -> list[AlignmentJob]:
+        """Return jobs in creation order."""
+        with self.lock:
+            return [self.jobs[job_id] for job_id in self.job_order]
 
     def update_job(
         self,
@@ -319,19 +495,121 @@ class JobStore:
         progress: float | None = None,
     ) -> AlignmentJob:
         """Update a job's status."""
-        with self.lock:
+        with self.condition:
             current = self.jobs.get(job_id)
-        progress_value = progress
-        if progress_value is None:
-            progress_value = current.progress if current else 0.0
-        job = AlignmentJob(job_id, status, message, output_srt, progress_value)
-        with self.lock:
+            if current is None:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE, f"job not found: {job_id}"
+                )
+            progress_value = progress
+            if progress_value is None:
+                progress_value = current.result.progress
+            message_value = message if message is not None else current.result.message
+            output_value = (
+                output_srt if output_srt is not None else current.result.output_srt
+            )
+            started_at = current.result.started_at
+            completed_at = current.result.completed_at
+            if status == JobStatus.QUEUED:
+                started_at = None
+                completed_at = None
+            if status == JobStatus.RUNNING and started_at is None:
+                started_at = self.clock()
+                completed_at = None
+            if status in (JobStatus.COMPLETED, JobStatus.FAILED):
+                if started_at is None:
+                    started_at = self.clock()
+                completed_at = self.clock()
+            result = AlignmentJobResult(
+                status=status,
+                message=message_value,
+                output_srt=output_value,
+                progress=progress_value,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+            job = AlignmentJob(job_id, current.created_at, current.job_input, result)
             self.jobs[job_id] = job
+            self.change_id += 1
+            self.condition.notify_all()
         return job
+
+    def wait_for_job_update(
+        self,
+        job_id: str,
+        last_seen: AlignmentJob | None,
+        timeout: float,
+    ) -> AlignmentJob | None:
+        """Wait for a job update or return the latest snapshot."""
+        with self.condition:
+            current = self.jobs.get(job_id)
+            if current is None:
+                return None
+            if last_seen is None or current != last_seen:
+                return current
+            self.condition.wait(timeout=timeout)
+            return self.jobs.get(job_id)
+
+    def wait_for_change(self, last_change_id: int, timeout: float) -> int:
+        """Wait for any job change and return the latest change id."""
+        with self.condition:
+            if self.change_id != last_change_id:
+                return self.change_id
+            self.condition.wait(timeout=timeout)
+            return self.change_id
 
     def job_dir(self, job_id: str) -> Path:
         """Return the directory for job artifacts."""
         return self.root_dir / job_id
+
+
+def estimate_alignment_seconds(audio_duration: float, device: str) -> float:
+    """Estimate alignment runtime for progress updates."""
+    scale = ALIGNMENT_TIME_SCALE.get(device, DEFAULT_ALIGNMENT_TIME_SCALE)
+    estimated = audio_duration * scale
+    if estimated < ALIGNMENT_MIN_SECONDS:
+        return ALIGNMENT_MIN_SECONDS
+    return estimated
+
+
+@dataclass
+class AlignmentProgressTracker:
+    """Progress updates for alignment work."""
+
+    store: JobStore
+    job_id: str
+    clock: Callable[[], float]
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    thread: threading.Thread | None = None
+
+    def start(self, audio_duration: float, device: str) -> None:
+        """Begin emitting progress updates."""
+        expected_seconds = estimate_alignment_seconds(audio_duration, device)
+
+        def run() -> None:
+            start_time = self.clock()
+            while not self.stop_event.wait(ALIGNMENT_PROGRESS_INTERVAL_SECONDS):
+                elapsed = self.clock() - start_time
+                fraction = min(max(elapsed / expected_seconds, 0.0), 0.99)
+                progress = ALIGNMENT_PROGRESS_START + (
+                    (ALIGNMENT_PROGRESS_MAX - ALIGNMENT_PROGRESS_START) * fraction
+                )
+                self.store.update_job(
+                    self.job_id,
+                    JobStatus.RUNNING,
+                    message="Aligning words to audio",
+                    progress=progress,
+                )
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        """Stop emitting progress updates."""
+        self.stop_event.set()
+        if self.thread is None:
+            return
+        self.thread.join(timeout=ALIGNMENT_PROGRESS_INTERVAL_SECONDS)
 
 
 def configure_logging() -> None:
@@ -528,16 +806,29 @@ def ensure_torchaudio_metadata() -> None:
     setattr(torchaudio, "AudioMetaData", audio_metadata_type)
 
 
-def load_whisperx_module() -> ModuleType:
-    """Import whisperx after verifying torchaudio metadata."""
+def load_whisperx_alignment_modules() -> tuple[ModuleType, ModuleType]:
+    """Import whisperx alignment modules without transcribe."""
     ensure_torchaudio_metadata()
+    package_spec = importlib.util.find_spec("whisperx")
+    if (
+        package_spec is None
+        or package_spec.submodule_search_locations is None
+    ):
+        raise AlignmentPipelineError(
+            ALIGNMENT_CODE, "whisperx is unavailable"
+        )
+    package_module = sys.modules.get("whisperx")
+    if package_module is None or getattr(package_module, "__path__", None) is None:
+        package_module = importlib.util.module_from_spec(package_spec)
+        sys.modules["whisperx"] = package_module
     try:
-        import whisperx
+        alignment_module = importlib.import_module("whisperx.alignment")
+        audio_module = importlib.import_module("whisperx.audio")
     except Exception as exc:
         raise AlignmentPipelineError(
-            ALIGNMENT_CODE, f"whisperx import failed: {exc}"
+            ALIGNMENT_CODE, f"whisperx alignment import failed: {exc}"
         ) from exc
-    return whisperx
+    return alignment_module, audio_module
 
 
 def parse_content_length(headers: Message) -> int:
@@ -749,22 +1040,20 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
 
 
 def load_alignment_model(
-    language: str, device: str
+    language: str,
+    device: str,
+    alignment_module: ModuleType | None = None,
 ) -> tuple[object, dict[str, object]]:
     """Load the alignment model and metadata."""
-    whisperx = load_whisperx_module()
-    model_name = ALIGNMENT_MODEL_OVERRIDES.get(language)
-    if (
-        language not in TORCHAUDIO_ALIGNMENT_LANGUAGES
-        and model_name is None
-    ):
+    if alignment_module is None:
+        alignment_module, _ = load_whisperx_alignment_modules()
+    if language not in TORCHAUDIO_ALIGNMENT_LANGUAGES:
         torch_module = load_torch_module()
         ensure_torch_version(torch_module, language)
     try:
-        return whisperx.load_align_model(
+        return alignment_module.load_align_model(
             language_code=language,
             device=device,
-            model_name=model_name,
         )
     except Exception as exc:
         raise AlignmentPipelineError(
@@ -785,16 +1074,21 @@ def align_words(
     transcript_text: str,
     language: str,
     device: str,
+    progress_tracker: AlignmentProgressTracker | None = None,
 ) -> tuple[AlignedWord, ...]:
     """Align transcript text to the audio and return word timings."""
-    whisperx = load_whisperx_module()
-    audio = whisperx.load_audio(audio_path)
-    audio_duration = float(len(audio)) / float(whisperx.audio.SAMPLE_RATE)
+    alignment_module, audio_module = load_whisperx_alignment_modules()
+    audio = audio_module.load_audio(audio_path)
+    audio_duration = float(len(audio)) / float(audio_module.SAMPLE_RATE)
     segments = [{"start": 0.0, "end": audio_duration, "text": transcript_text}]
 
-    align_model, metadata = load_alignment_model(language, device)
     try:
-        result = whisperx.align(
+        if progress_tracker is not None:
+            progress_tracker.start(audio_duration, device)
+        align_model, metadata = load_alignment_model(
+            language, device, alignment_module
+        )
+        result = alignment_module.align(
             segments,
             align_model,
             metadata,
@@ -806,6 +1100,9 @@ def align_words(
         raise AlignmentPipelineError(
             ALIGNMENT_CODE, f"alignment failed: {exc}"
         ) from exc
+    finally:
+        if progress_tracker is not None:
+            progress_tracker.stop()
 
     return extract_aligned_words(result.get("segments", []))
 
@@ -868,9 +1165,17 @@ def format_srt_timestamp(milliseconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
-def build_srt(words: Sequence[AlignedWord]) -> str:
+def build_srt(
+    words: Sequence[AlignedWord],
+    metadata: SrtMetadata | None = None,
+) -> str:
     """Build SRT content from aligned words."""
     lines: list[str] = []
+    if metadata is not None:
+        lines.append("NOTE")
+        lines.append(f"source audio: {metadata.audio_filename}")
+        lines.append(f"source text: {metadata.text_filename}")
+        lines.append("")
     for index, word in enumerate(words, start=1):
         start_ms = srt_timestamp_from_seconds(word.start_seconds, "floor")
         end_ms = srt_timestamp_from_seconds(word.end_seconds, "ceil")
@@ -1097,23 +1402,6 @@ def build_ui_html(defaults: UiDefaults) -> str:
       transform: none;
       box-shadow: none;
     }
-    .progress {
-      height: 6px;
-      border-radius: 999px;
-      background: rgba(29, 27, 25, 0.08);
-      overflow: hidden;
-    }
-    .progress-bar {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, rgba(43, 122, 120, 0.2), rgba(43, 122, 120, 0.7), rgba(43, 122, 120, 0.2));
-      background-size: 200% 100%;
-      transition: width 0.3s ease;
-      opacity: 0.6;
-    }
-    body.running .progress-bar {
-      animation: shimmer 1.6s linear infinite;
-    }
     .status {
       display: grid;
       gap: 6px;
@@ -1125,16 +1413,103 @@ def build_ui_html(defaults: UiDefaults) -> str:
     .status-sub {
       color: var(--muted);
     }
-    .download {
+    .jobs {
+      display: grid;
+      gap: 12px;
+    }
+    .jobs-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .jobs-count {
+      font-weight: 600;
+      color: var(--ink);
+    }
+    .job-list {
+      display: grid;
+      gap: 12px;
+    }
+    .job-card {
+      border-radius: 18px;
+      border: 1px solid var(--stroke);
+      background: rgba(255, 255, 255, 0.7);
+      padding: 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .job-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .job-title {
+      font-weight: 600;
+      font-size: 1rem;
+    }
+    .job-status {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(43, 122, 120, 0.12);
+      color: var(--accent-cool);
+      font-weight: 600;
+    }
+    .job-status.is-queued {
+      background: rgba(95, 91, 85, 0.12);
+      color: var(--muted);
+    }
+    .job-status.is-running {
+      background: rgba(43, 122, 120, 0.18);
+      color: var(--accent-cool);
+    }
+    .job-status.is-complete {
+      background: rgba(43, 122, 120, 0.2);
+      color: var(--accent-cool);
+    }
+    .job-status.is-failed {
+      background: rgba(241, 84, 45, 0.12);
+      color: #8a2a16;
+    }
+    .job-meta,
+    .job-message {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .job-progress {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(29, 27, 25, 0.08);
+      overflow: hidden;
+    }
+    .job-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, rgba(43, 122, 120, 0.2), rgba(43, 122, 120, 0.7), rgba(43, 122, 120, 0.2));
+      background-size: 200% 100%;
+      transition: width 0.3s ease;
+    }
+    .job-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .job-download {
       display: inline-flex;
       align-items: center;
       gap: 8px;
       color: var(--accent-cool);
       text-decoration: none;
       font-weight: 600;
-      margin-top: 8px;
     }
-    .download:hover {
+    .job-download:hover {
       color: #206362;
     }
     .error {
@@ -1203,14 +1578,17 @@ def build_ui_html(defaults: UiDefaults) -> str:
       </div>
       <div class="actions">
         <button id="run-button" class="run-button">Align and Build SRT</button>
-        <div class="progress">
-          <div class="progress-bar"></div>
-        </div>
       </div>
       <div class="status">
         <div class="status-main" id="status-line">Ready to align.</div>
         <div class="status-sub" id="status-sub">Upload files to begin.</div>
-        <a id="download-link" class="download hidden" href="#">Download SRT</a>
+      </div>
+      <div class="jobs">
+        <div class="jobs-header">
+          <span>Session jobs</span>
+          <span class="jobs-count" id="job-count">0</span>
+        </div>
+        <div class="job-list" id="job-list"></div>
       </div>
       <div class="error hidden" id="error-line"></div>
     </section>
@@ -1225,14 +1603,17 @@ def build_ui_html(defaults: UiDefaults) -> str:
     const runButton = document.getElementById("run-button");
     const statusLine = document.getElementById("status-line");
     const statusSub = document.getElementById("status-sub");
-    const downloadLink = document.getElementById("download-link");
     const errorLine = document.getElementById("error-line");
     const languageInput = document.getElementById("language");
     const deviceSelect = document.getElementById("device");
-    const progressBar = document.querySelector(".progress-bar");
+    const jobList = document.getElementById("job-list");
+    const jobCount = document.getElementById("job-count");
+    const jobEntries = new Map();
+    let jobStream = null;
     let audioFile = null;
     let textFile = null;
-    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const defaultAudioMeta = audioMeta.textContent;
+    const defaultTextMeta = textMeta.textContent;
 
     function setStatus(mainText, subText) {
       statusLine.textContent = mainText;
@@ -1249,9 +1630,205 @@ def build_ui_html(defaults: UiDefaults) -> str:
       errorLine.textContent = "";
     }
 
-    function setProgress(value) {
-      const clamped = Math.max(0, Math.min(1, value));
-      progressBar.style.width = Math.round(clamped * 100) + "%";
+    function updateJobCount() {
+      jobCount.textContent = String(jobEntries.size);
+    }
+
+    function resetDropzone(zone, input, meta, defaultText) {
+      zone.classList.remove("is-filled");
+      input.value = "";
+      meta.textContent = defaultText;
+    }
+
+    function resetInputs() {
+      audioFile = null;
+      textFile = null;
+      resetDropzone(audioZone, audioInput, audioMeta, defaultAudioMeta);
+      resetDropzone(textZone, textInput, textMeta, defaultTextMeta);
+    }
+
+    function statusLabel(statusValue) {
+      if (statusValue === "queued") {
+        return "Queued";
+      }
+      if (statusValue === "running") {
+        return "Running";
+      }
+      if (statusValue === "completed") {
+        return "Complete";
+      }
+      if (statusValue === "failed") {
+        return "Failed";
+      }
+      return "Unknown";
+    }
+
+    function setStatusBadge(element, statusValue) {
+      element.textContent = statusLabel(statusValue);
+      element.classList.remove(
+        "is-queued",
+        "is-running",
+        "is-complete",
+        "is-failed",
+      );
+      if (statusValue === "queued") {
+        element.classList.add("is-queued");
+      } else if (statusValue === "running") {
+        element.classList.add("is-running");
+      } else if (statusValue === "completed") {
+        element.classList.add("is-complete");
+      } else if (statusValue === "failed") {
+        element.classList.add("is-failed");
+      }
+    }
+
+    function createJobEntry(job) {
+      const card = document.createElement("div");
+      card.className = "job-card";
+      const header = document.createElement("div");
+      header.className = "job-header";
+      const title = document.createElement("div");
+      title.className = "job-title";
+      const status = document.createElement("div");
+      status.className = "job-status";
+      header.appendChild(title);
+      header.appendChild(status);
+      const meta = document.createElement("div");
+      meta.className = "job-meta";
+      const message = document.createElement("div");
+      message.className = "job-message";
+      const progress = document.createElement("div");
+      progress.className = "job-progress";
+      const progressBar = document.createElement("div");
+      progressBar.className = "job-progress-bar";
+      progress.appendChild(progressBar);
+      const actions = document.createElement("div");
+      actions.className = "job-actions";
+      const download = document.createElement("a");
+      download.className = "job-download hidden";
+      download.textContent = "Download SRT";
+      download.href = "#";
+      actions.appendChild(download);
+      card.appendChild(header);
+      card.appendChild(meta);
+      card.appendChild(message);
+      card.appendChild(progress);
+      card.appendChild(actions);
+      return {
+        card,
+        title,
+        status,
+        meta,
+        message,
+        progressBar,
+        download,
+      };
+    }
+
+    function updateJobEntry(entry, job) {
+      const statusValue = String(job.status || "queued");
+      const audioName = job.audio_filename || "Audio alignment";
+      const textName = job.text_filename || "unknown text";
+      const languageLabel = job.language ? job.language.toUpperCase() : "";
+      const deviceLabel = job.device ? job.device.toUpperCase() : "";
+      const metaParts = ["Text: " + textName];
+      if (languageLabel) {
+        metaParts.push("Lang: " + languageLabel);
+      }
+      if (deviceLabel) {
+        metaParts.push("Device: " + deviceLabel);
+      }
+      entry.title.textContent = audioName;
+      entry.meta.textContent = metaParts.join(" • ");
+      setStatusBadge(entry.status, statusValue);
+      entry.message.textContent = job.message || statusLabel(statusValue);
+      const progressValue = typeof job.progress === "number" ? job.progress : 0;
+      const clamped = Math.max(0, Math.min(1, progressValue));
+      entry.progressBar.style.width = Math.round(clamped * 100) + "%";
+      if (job.output_ready || statusValue === "completed") {
+        entry.download.href = "/api/jobs/" + job.job_id + "/srt";
+        entry.download.classList.remove("hidden");
+      } else {
+        entry.download.classList.add("hidden");
+      }
+    }
+
+    function applyJobUpdate(job) {
+      if (!job || !job.job_id) {
+        return;
+      }
+      let entry = jobEntries.get(job.job_id);
+      if (!entry) {
+        entry = createJobEntry(job);
+        jobEntries.set(job.job_id, entry);
+      }
+      updateJobEntry(entry, job);
+      updateJobCount();
+    }
+
+    function applyJobList(jobs) {
+      const seen = new Set();
+      jobs.forEach((job) => {
+        applyJobUpdate(job);
+        seen.add(job.job_id);
+      });
+      for (const [jobId, entry] of jobEntries) {
+        if (!seen.has(jobId)) {
+          entry.card.remove();
+          jobEntries.delete(jobId);
+        }
+      }
+      jobList.innerHTML = "";
+      jobs.forEach((job) => {
+        const entry = jobEntries.get(job.job_id);
+        if (entry) {
+          jobList.appendChild(entry.card);
+        }
+      });
+      updateJobCount();
+    }
+
+    async function loadJobs() {
+      try {
+        const response = await fetch("/api/jobs");
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (Array.isArray(payload.jobs)) {
+          applyJobList(payload.jobs);
+        }
+      } catch (error) {
+        setError("Failed to load job history.");
+      }
+    }
+
+    function startJobStream() {
+      if (jobStream || !window.EventSource) {
+        return;
+      }
+      const stream = new EventSource("/api/jobs/events");
+      jobStream = stream;
+      stream.addEventListener("message", (event) => {
+        clearError();
+        let payload = null;
+        try {
+          payload = JSON.parse(event.data);
+        } catch (error) {
+          setError("Failed to parse job updates.");
+          return;
+        }
+        if (payload && Array.isArray(payload.jobs)) {
+          applyJobList(payload.jobs);
+          return;
+        }
+        if (payload && payload.job_id) {
+          applyJobUpdate(payload);
+        }
+      });
+      stream.addEventListener("error", () => {
+        setError("Connection lost while streaming job updates.");
+      });
     }
 
     function markZone(zone, meta, file) {
@@ -1291,63 +1868,45 @@ def build_ui_html(defaults: UiDefaults) -> str:
 
     async function startJob() {
       clearError();
-      downloadLink.classList.add("hidden");
-      setProgress(0);
       if (!audioFile || !textFile) {
         setError("Select both an audio file and a transcript file.");
         return;
       }
       runButton.disabled = true;
-      document.body.classList.add("running");
       setStatus("Queued.", "Uploading files and preparing alignment.");
       const formData = new FormData();
       formData.append("audio", audioFile, audioFile.name);
       formData.append("text", textFile, textFile.name);
       formData.append("language", languageInput.value.trim());
       formData.append("device", deviceSelect.value);
-      let response = await fetch("/api/jobs", { method: "POST", body: formData });
-      let payload = await response.json();
+      let response = null;
+      try {
+        response = await fetch("/api/jobs", { method: "POST", body: formData });
+      } catch (error) {
+        setError("Failed to submit the job.");
+        runButton.disabled = false;
+        return;
+      }
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = {};
+      }
       if (!response.ok) {
         setError(payload.error || "Failed to start alignment.");
         runButton.disabled = false;
-        document.body.classList.remove("running");
         return;
       }
-      await pollStatus(payload.job_id);
-    }
-
-    async function pollStatus(jobId) {
-      while (true) {
-        let response = await fetch(`/api/jobs/$${jobId}`);
-        if (!response.ok) {
-          setError("Failed to check job status.");
-          break;
-        }
-        let payload = await response.json();
-        const progressValue = typeof payload.progress === "number" ? payload.progress : 0;
-        setProgress(progressValue);
-        if (payload.status === "completed") {
-          setStatus("Complete.", payload.message || "SRT is ready to download.");
-          downloadLink.href = `/api/jobs/$${jobId}/srt`;
-          downloadLink.classList.remove("hidden");
-          break;
-        }
-        if (payload.status === "failed") {
-          setError(payload.message || "Alignment failed.");
-          break;
-        }
-        if (payload.status === "queued") {
-          setStatus("Queued.", payload.message || "Waiting for worker.");
-        } else {
-          setStatus("Running.", payload.message || "Aligning words to audio.");
-        }
-        await delay(1000);
-      }
+      applyJobUpdate(payload);
+      setStatus("Queued.", "Job added to the session.");
+      resetInputs();
       runButton.disabled = false;
-      document.body.classList.remove("running");
     }
 
     runButton.addEventListener("click", () => startJob());
+    loadJobs();
+    startJobStream();
   </script>
 </body>
 </html>
@@ -1366,8 +1925,12 @@ def run_ui_server(request: AlignmentRequest) -> int:
         device=request.device,
     )
     root_dir = resolve_ui_root_dir()
-    job_store = JobStore(root_dir=root_dir)
-    executor = ThreadPoolExecutor(max_workers=2)
+    job_store = JobStore(
+        root_dir=root_dir,
+        clock=time.time,
+        id_factory=lambda: uuid.uuid4().hex,
+    )
+    executor = ThreadPoolExecutor(max_workers=1)
     handler = build_ui_handler(job_store, executor, defaults)
     server = ThreadingHTTPServer((request.ui_host, request.ui_port), handler)
     LOGGER.info(
@@ -1405,10 +1968,20 @@ def build_ui_handler(
             if parsed.path == "/":
                 self.send_html(build_ui_html(defaults))
                 return
+            if parsed.path == "/api/jobs":
+                self.send_jobs_list()
+                return
+            if parsed.path == "/api/jobs/events":
+                self.send_jobs_events()
+                return
             if parsed.path.startswith("/api/jobs/"):
-                job_id = parsed.path.split("/")[3] if parsed.path.count("/") >= 3 else ""
+                parts = parsed.path.split("/")
+                job_id = parts[3] if len(parts) > 3 else ""
                 if parsed.path.endswith("/srt"):
                     self.send_srt(job_id)
+                    return
+                if parsed.path.endswith("/events"):
+                    self.send_job_events(job_id)
                     return
                 self.send_job_status(job_id)
                 return
@@ -1440,9 +2013,91 @@ def build_ui_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def send_sse_headers(self) -> None:
+            """Send headers for an SSE response."""
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+        def send_sse_event(self, payload: dict[str, object]) -> bool:
+            """Send a single SSE event."""
+            body = f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+            try:
+                self.wfile.write(body)
+                self.wfile.flush()
+            except OSError:
+                return False
+            return True
+
+        def send_sse_keepalive(self) -> bool:
+            """Send a keepalive SSE comment."""
+            try:
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+            except OSError:
+                return False
+            return True
+
         def send_error_response(self, status: HTTPStatus, message: str) -> None:
             """Send an error JSON payload."""
             self.send_json(status, {"error": message})
+
+        def build_job_payload(self, job: AlignmentJob) -> dict[str, object]:
+            """Build the job status payload."""
+            return {
+                "job_id": job.job_id,
+                "status": job.result.status.value,
+                "message": job.result.message,
+                "output_ready": bool(job.result.output_srt),
+                "progress": job.result.progress,
+                "audio_filename": job.job_input.audio_filename,
+                "text_filename": job.job_input.text_filename,
+                "language": job.job_input.language,
+                "device": job.job_input.device,
+                "created_at": job.created_at,
+                "started_at": job.result.started_at,
+                "completed_at": job.result.completed_at,
+            }
+
+        def send_jobs_list(self) -> None:
+            """Return the current job list."""
+            jobs = store.list_jobs()
+            payload = {"jobs": [self.build_job_payload(job) for job in jobs]}
+            self.send_json(HTTPStatus.OK, payload)
+
+        def send_jobs_events(self) -> None:
+            """Stream job updates as SSE events."""
+            self.send_sse_headers()
+            change_id = store.change_id
+            jobs = store.list_jobs()
+            if not self.send_sse_event(
+                {
+                    "type": "snapshot",
+                    "change_id": change_id,
+                    "jobs": [self.build_job_payload(job) for job in jobs],
+                }
+            ):
+                return
+            while True:
+                next_change = store.wait_for_change(
+                    change_id, SSE_KEEPALIVE_SECONDS
+                )
+                if next_change == change_id:
+                    if not self.send_sse_keepalive():
+                        return
+                    continue
+                change_id = next_change
+                jobs = store.list_jobs()
+                if not self.send_sse_event(
+                    {
+                        "type": "snapshot",
+                        "change_id": change_id,
+                        "jobs": [self.build_job_payload(job) for job in jobs],
+                    }
+                ):
+                    return
 
         def send_job_status(self, job_id: str) -> None:
             """Return the current job status."""
@@ -1450,24 +2105,48 @@ def build_ui_handler(
             if job is None:
                 self.send_error_response(HTTPStatus.NOT_FOUND, "Job not found")
                 return
-            self.send_json(
-                HTTPStatus.OK,
-                {
-                    "job_id": job.job_id,
-                    "status": job.status.value,
-                    "message": job.message,
-                    "output_ready": bool(job.output_srt),
-                    "progress": job.progress,
-                },
-            )
+            self.send_json(HTTPStatus.OK, self.build_job_payload(job))
+
+        def send_job_events(self, job_id: str) -> None:
+            """Stream job updates as SSE events."""
+            if not job_id:
+                self.send_error_response(
+                    HTTPStatus.BAD_REQUEST, "Job id is required"
+                )
+                return
+            job = store.get_job(job_id)
+            if job is None:
+                self.send_error_response(HTTPStatus.NOT_FOUND, "Job not found")
+                return
+            self.send_sse_headers()
+            if not self.send_sse_event(self.build_job_payload(job)):
+                return
+            last_seen = job
+            while job.result.status not in (
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+            ):
+                updated = store.wait_for_job_update(
+                    job_id, last_seen, SSE_KEEPALIVE_SECONDS
+                )
+                if updated is None:
+                    break
+                if updated == last_seen:
+                    if not self.send_sse_keepalive():
+                        return
+                    continue
+                job = updated
+                if not self.send_sse_event(self.build_job_payload(job)):
+                    return
+                last_seen = job
 
         def send_srt(self, job_id: str) -> None:
             """Return the generated SRT file."""
             job = store.get_job(job_id)
-            if job is None or job.output_srt is None:
+            if job is None or job.result.output_srt is None:
                 self.send_error_response(HTTPStatus.NOT_FOUND, "SRT not available")
                 return
-            output_path = Path(job.output_srt)
+            output_path = Path(job.result.output_srt)
             try:
                 content = output_path.read_text(encoding="utf-8")
             except OSError:
@@ -1498,48 +2177,59 @@ def build_ui_handler(
                 )
                 return
 
-            job = store.create_job()
-            job_dir = store.job_dir(job.job_id)
-            job_dir.mkdir(parents=True, exist_ok=True)
+            job_id = store.new_job_id()
+            job_dir = store.job_dir(job_id)
             audio_suffix = Path(upload.audio.filename).suffix or ".bin"
             text_suffix = Path(upload.text.filename).suffix or ".txt"
             audio_path = job_dir / f"audio{audio_suffix}"
             text_path = job_dir / f"text{text_suffix}"
             output_path = job_dir / "alignment.srt"
+            job_input = AlignmentJobInput(
+                audio_filename=upload.audio.filename,
+                text_filename=upload.text.filename,
+                language=upload.language,
+                device=upload.device,
+                audio_path=str(audio_path),
+                text_path=str(text_path),
+                output_path=str(output_path),
+            )
+            try:
+                job = store.create_job(job_id, job_input)
+                job_dir.mkdir(parents=True, exist_ok=True)
+            except (AlignmentPipelineError, OSError) as exc:
+                self.send_error_response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    f"job setup failed: {exc}",
+                )
+                return
 
             try:
                 audio_path.write_bytes(upload.audio.payload)
                 text_path.write_bytes(upload.text.payload)
             except OSError:
-                store.update_job(job.job_id, JobStatus.FAILED, "Upload write failed")
-                self.send_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Upload failed")
+                store.update_job(
+                    job.job_id,
+                    JobStatus.FAILED,
+                    "Upload write failed",
+                    progress=1.0,
+                )
+                self.send_error_response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR, "Upload failed"
+                )
                 return
 
-            executor.submit(
-                run_alignment_job,
-                store,
-                job.job_id,
-                str(audio_path),
-                str(text_path),
-                str(output_path),
-                upload.language,
-                upload.device,
-            )
-            self.send_json(HTTPStatus.OK, {"job_id": job.job_id})
+            executor.submit(run_alignment_job, store, job.job_id)
+            self.send_json(HTTPStatus.OK, self.build_job_payload(job))
 
     return UiHandler
 
 
-def run_alignment_job(
-    store: JobStore,
-    job_id: str,
-    audio_path: str,
-    text_path: str,
-    output_path: str,
-    language: str,
-    device: str,
-) -> None:
+def run_alignment_job(store: JobStore, job_id: str) -> None:
     """Process a background alignment job."""
+    job = store.get_job(job_id)
+    if job is None:
+        return
+    job_input = job.job_input
     store.update_job(
         job_id,
         JobStatus.RUNNING,
@@ -1547,7 +2237,7 @@ def run_alignment_job(
         progress=0.05,
     )
     try:
-        ensure_audio_file_exists(audio_path)
+        ensure_audio_file_exists(job_input.audio_path)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
@@ -1555,8 +2245,8 @@ def run_alignment_job(
             progress=0.15,
         )
         transcript_text = normalize_transcript(
-            read_utf8_text_strict(text_path),
-            text_path,
+            read_utf8_text_strict(job_input.text_path),
+            job_input.text_path,
         )
         store.update_job(
             job_id,
@@ -1564,18 +2254,24 @@ def run_alignment_job(
             message="Resolving device",
             progress=0.3,
         )
-        resolved_device = resolve_device(device)
+        resolved_device = resolve_device(job_input.device)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
             message="Aligning words to audio",
-            progress=0.45,
+            progress=ALIGNMENT_PROGRESS_START,
+        )
+        progress_tracker = AlignmentProgressTracker(
+            store=store,
+            job_id=job_id,
+            clock=time.monotonic,
         )
         words = align_words(
-            audio_path,
+            job_input.audio_path,
             transcript_text,
-            language,
+            job_input.language,
             resolved_device,
+            progress_tracker=progress_tracker,
         )
         store.update_job(
             job_id,
@@ -1583,19 +2279,23 @@ def run_alignment_job(
             message="Building subtitle output",
             progress=0.85,
         )
-        srt_content = build_srt(words)
+        metadata = SrtMetadata(
+            audio_filename=job_input.audio_filename,
+            text_filename=job_input.text_filename,
+        )
+        srt_content = build_srt(words, metadata)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
             message="Writing subtitle file",
             progress=0.95,
         )
-        write_srt_file(output_path, srt_content)
+        write_srt_file(job_input.output_path, srt_content)
         store.update_job(
             job_id,
             JobStatus.COMPLETED,
             message="Complete",
-            output_srt=output_path,
+            output_srt=job_input.output_path,
             progress=1.0,
         )
     except AlignmentValidationError as exc:
@@ -1641,7 +2341,11 @@ def main() -> int:
             request.language,
             resolved_device,
         )
-        srt_content = build_srt(words)
+        metadata = SrtMetadata(
+            audio_filename=Path(request.input_audio or "").name,
+            text_filename=Path(request.input_text or "").name,
+        )
+        srt_content = build_srt(words, metadata)
         write_srt_file(request.output_srt or "", srt_content)
         LOGGER.info("audio_to_text.output.srt_written: %s", request.output_srt)
         return 0

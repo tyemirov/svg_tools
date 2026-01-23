@@ -218,3 +218,19 @@ proceed
 ## Improvements Addendum (200–299)
 
 - [x] [I119] Restrict audio_to_text to a Linux-only Docker runtime, persist UI uploads under data/, and document container testing. Resolved with a Linux guardrail, data volume mapping, and README updates.
+
+## Maintenance Addendum (400–499)
+
+- [x] [M404] Remove docker-compose profiles for audio_to_text now that no published image exists. Resolved with a single compose service and updated README commands.
+- [x] [M405] Remove the Russian alignment model override to rely on whisperx defaults. Resolved by dropping the override map and using whisperx model selection.
+- [x] [M406] Bind-mount the Hugging Face cache to host storage for audio_to_text. Resolved by switching /opt/hf-cache to data/hf-cache and documenting the cache path.
+
+## BugFixes Addendum (300–399)
+
+- [x] [B330] Avoid whisperx import failures from ctranslate2 exec-stack requirements by importing alignment modules directly. Resolved with alignment-only imports that skip transcribe.
+
+## Improvements Addendum (200–299)
+
+- [x] [I120] Replace audio_to_text UI polling with SSE job updates. Resolved with EventSource streaming and a new SSE endpoint.
+- [x] [I121] Add a smoother alignment progress signal for the audio_to_text UI. Resolved with time-based progress updates emitted during alignment.
+- [x] [I122] Stack audio_to_text UI jobs with per-job downloads and embed input metadata in generated SRT files. Resolved with queued job tracking, SSE list updates, and SRT metadata headers.

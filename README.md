@@ -274,6 +274,7 @@ Force-align audio or video to a provided transcript and emit an SRT with word-le
 The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
 audio_to_text is supported on Linux only; on macOS or Windows, run it via Docker.
 Uploads are stored under `data/audio_to_text_uploads` and persisted via the `data/` bind mount in the Docker compose files.
+Model downloads are cached under `data/hf-cache` on the host.
 
 **Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
 **Runtime requirements:** torch >= 2.6 and torchaudio >= 2.6 (pinned for Linux) for AudioMetaData support and Hugging Face `.bin` models.
@@ -289,20 +290,13 @@ cp .env.audio_to_text.example .env.audio_to_text
 Development (bind-mounts the repo for local changes):
 
 ```shell
-docker compose -f docker/audio_to_text/docker-compose.dev.yml up --build
-```
-
-Production (pull the newest base image before building):
-
-```shell
-docker compose -f docker/audio_to_text/docker-compose.prod.yml build --pull
-docker compose -f docker/audio_to_text/docker-compose.prod.yml up
+docker compose -f docker/audio_to_text/docker-compose.yml up --build
 ```
 
 Tests (Linux container):
 
 ```shell
-docker compose -f docker/audio_to_text/docker-compose.dev.yml run --rm --entrypoint make audio_to_text test
+docker compose -f docker/audio_to_text/docker-compose.yml run --rm --entrypoint make audio_to_text test
 ```
 
 ---

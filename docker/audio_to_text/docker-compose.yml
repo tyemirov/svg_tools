@@ -10,8 +10,5 @@ services:
     volumes:
       - ../../:/app
       - ../../data:/app/data
-      - audio_to_text_cache:/opt/hf-cache
+      - ../../data/hf-cache:/opt/hf-cache
     command: ["--ui", "--ui-host", "0.0.0.0", "--ui-port", "7865"]
-
-volumes:
-  audio_to_text_cache:
