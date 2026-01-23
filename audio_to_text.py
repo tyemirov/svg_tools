@@ -22,12 +22,14 @@ import math
 import os
 import platform
 import re
-import shutil
 import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from email.message import Message
+from email.parser import BytesParser
+from email.policy import default
 from enum import Enum
 from html import escape
 from http import HTTPStatus
@@ -35,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
 from types import ModuleType
-from typing import Iterable, Sequence
+from typing import BinaryIO, Iterable, Sequence
 from urllib.parse import urlparse
 
 
@@ -54,6 +56,8 @@ TORCH_VERSION_CODE = "audio_to_text.dependency.torch_version"
 TORCHAUDIO_METADATA_CODE = "audio_to_text.dependency.torchaudio_metadata"
 PLATFORM_CODE = "audio_to_text.dependency.platform"
 UI_STORAGE_CODE = "audio_to_text.ui.storage"
+UI_UPLOAD_CODE = "audio_to_text.ui.upload.invalid"
+UI_UPLOAD_BODY_CODE = "audio_to_text.ui.upload.body"
 INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
@@ -233,6 +237,38 @@ class UiDefaults:
 
     language: str
     device: str
+
+
+@dataclass(frozen=True)
+class UploadFile:
+    """Uploaded file payload and filename."""
+
+    filename: str
+    payload: bytes
+
+    def __post_init__(self) -> None:
+        if not self.filename:
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE, "upload filename is required"
+            )
+
+
+@dataclass(frozen=True)
+class UploadForm:
+    """Parsed upload form payload."""
+
+    audio: UploadFile
+    text: UploadFile
+    language: str
+    device: str
+
+    def __post_init__(self) -> None:
+        if not self.language.strip():
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE, "language is required"
+            )
+        if not self.device.strip():
+            raise AlignmentValidationError(UI_UPLOAD_CODE, "device is required")
 
 
 @dataclass(frozen=True)
@@ -504,29 +540,170 @@ def load_whisperx_module() -> ModuleType:
     return whisperx
 
 
-def normalize_form_value(raw_value: object, default_value: str) -> str:
-    """Normalize a form value into a string."""
-    if raw_value is None:
-        return default_value
-    if isinstance(raw_value, list):
-        if not raw_value:
-            return default_value
-        return str(raw_value[0])
-    return str(raw_value)
-
-
-def load_cgi_module() -> ModuleType:
-    """Import cgi without emitting deprecation warnings."""
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            category=DeprecationWarning,
-            message=r".*'cgi' is deprecated.*",
+def parse_content_length(headers: Message) -> int:
+    """Parse Content-Length header."""
+    raw_length = headers.get("Content-Length")
+    if raw_length is None:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "Content-Length header is required"
         )
-        import cgi
-    return cgi
+    try:
+        length = int(raw_length)
+    except ValueError as exc:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "Content-Length must be an integer"
+        ) from exc
+    if length <= 0:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "Content-Length must be positive"
+        )
+    return length
+
+
+def read_request_body(stream: BinaryIO, length: int) -> bytes:
+    """Read the HTTP request body."""
+    body = stream.read(length)
+    if body is None or len(body) != length:
+        raise AlignmentValidationError(
+            UI_UPLOAD_BODY_CODE, "request body is incomplete"
+        )
+    return body
+
+
+def validate_multipart_content_type(content_type: str) -> None:
+    """Validate multipart Content-Type header."""
+    if not content_type:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "Content-Type header is required"
+        )
+    if "multipart/form-data" not in content_type.lower():
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "expected multipart form data"
+        )
+    header = Message()
+    header["Content-Type"] = content_type
+    boundary = header.get_param("boundary")
+    if not boundary:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "multipart boundary is required"
+        )
+
+
+def parse_multipart_message(content_type: str, body: bytes) -> Message:
+    """Parse a multipart HTTP body into a message."""
+    validate_multipart_content_type(content_type)
+    header_bytes = (
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n"
+    ).encode("utf-8")
+    parser = BytesParser(policy=default)
+    try:
+        message = parser.parsebytes(header_bytes + body)
+    except Exception as exc:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, f"multipart parse failed: {exc}"
+        ) from exc
+    if not message.is_multipart():
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "multipart parse failed"
+        )
+    return message
+
+
+def decode_form_text(part: Message, payload: bytes, field_name: str) -> str:
+    """Decode a form field payload."""
+    charset = part.get_content_charset()
+    if charset and charset.lower() != "utf-8":
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE,
+            f"unsupported charset for {field_name}: {charset}",
+        )
+    try:
+        return payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, f"invalid UTF-8 in {field_name}"
+        ) from exc
+
+
+def require_form_field(fields: dict[str, str], name: str) -> str:
+    """Return a required form field value."""
+    if name not in fields:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, f"missing form field: {name}"
+        )
+    return fields[name]
+
+
+def require_upload(files: dict[str, UploadFile], name: str) -> UploadFile:
+    """Return a required file upload."""
+    if name not in files:
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, f"missing upload field: {name}"
+        )
+    return files[name]
+
+
+def parse_upload_form(
+    content_type: str,
+    body: bytes,
+    defaults: UiDefaults,
+) -> UploadForm:
+    """Parse the upload form into a structured payload."""
+    message = parse_multipart_message(content_type, body)
+    allowed_fields = {"audio", "text", "language", "device"}
+    fields: dict[str, str] = {}
+    files: dict[str, UploadFile] = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="Content-Disposition")
+        if not name:
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE, "multipart field name is required"
+            )
+        if name not in allowed_fields:
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE, f"unexpected form field: {name}"
+            )
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE, f"missing payload for field: {name}"
+            )
+        filename = part.get_filename()
+        if filename:
+            if name in files:
+                raise AlignmentValidationError(
+                    UI_UPLOAD_CODE, f"duplicate upload field: {name}"
+                )
+            files[name] = UploadFile(filename=filename, payload=payload)
+        else:
+            if name in fields:
+                raise AlignmentValidationError(
+                    UI_UPLOAD_CODE, f"duplicate form field: {name}"
+                )
+            fields[name] = decode_form_text(part, payload, name)
+
+    audio = require_upload(files, "audio")
+    text = require_upload(files, "text")
+    language_raw = require_form_field(fields, "language")
+    device_raw = require_form_field(fields, "device")
+    if not language_raw.strip():
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "language must be provided"
+        )
+    if not device_raw.strip():
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "device must be provided"
+        )
+    language_value = normalize_language_value(
+        language_raw, defaults.language
+    )
+    device_value = normalize_device_value(device_raw, defaults.device)
+    return UploadForm(
+        audio=audio,
+        text=text,
+        language=language_value,
+        device=device_value,
+    )
 
 
 def parse_args(argv: Sequence[str]) -> AlignmentRequest:
@@ -1126,7 +1303,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
       const formData = new FormData();
       formData.append("audio", audioFile, audioFile.name);
       formData.append("text", textFile, textFile.name);
-      formData.append("language", languageInput.value.trim() || "en");
+      formData.append("language", languageInput.value.trim());
       formData.append("device", deviceSelect.value);
       let response = await fetch("/api/jobs", { method: "POST", body: formData });
       let payload = await response.json();
@@ -1307,72 +1484,35 @@ def build_ui_handler(
 
         def handle_create_job(self) -> None:
             """Accept uploads and queue a background alignment job."""
-            cgi = load_cgi_module()
-
-            content_type = self.headers.get("Content-Type", "")
-            if "multipart/form-data" not in content_type:
-                self.send_error_response(HTTPStatus.BAD_REQUEST, "Expected multipart form")
-                return
-            environ = {
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": content_type,
-            }
-            content_length = self.headers.get("Content-Length")
-            if content_length:
-                environ["CONTENT_LENGTH"] = content_length
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ=environ,
-            )
             try:
-                audio_field = form["audio"]
-                text_field = form["text"]
-            except KeyError:
-                self.send_error_response(HTTPStatus.BAD_REQUEST, "Missing file fields")
-                return
-            if isinstance(audio_field, list) or isinstance(text_field, list):
-                self.send_error_response(HTTPStatus.BAD_REQUEST, "Invalid file upload")
-                return
-            if not getattr(audio_field, "filename", "") or not getattr(text_field, "filename", ""):
-                self.send_error_response(HTTPStatus.BAD_REQUEST, "Invalid file upload")
+                content_length = parse_content_length(self.headers)
+                body = read_request_body(self.rfile, content_length)
+                upload = parse_upload_form(
+                    self.headers.get("Content-Type", ""),
+                    body,
+                    defaults,
+                )
+            except AlignmentValidationError as exc:
+                self.send_error_response(
+                    HTTPStatus.BAD_REQUEST, f"{exc.code}: {exc}"
+                )
                 return
 
             job = store.create_job()
             job_dir = store.job_dir(job.job_id)
             job_dir.mkdir(parents=True, exist_ok=True)
-            audio_suffix = Path(audio_field.filename).suffix or ".bin"
-            text_suffix = Path(text_field.filename).suffix or ".txt"
+            audio_suffix = Path(upload.audio.filename).suffix or ".bin"
+            text_suffix = Path(upload.text.filename).suffix or ".txt"
             audio_path = job_dir / f"audio{audio_suffix}"
             text_path = job_dir / f"text{text_suffix}"
             output_path = job_dir / "alignment.srt"
 
             try:
-                with open(audio_path, "wb") as audio_target:
-                    shutil.copyfileobj(audio_field.file, audio_target)
-                with open(text_path, "wb") as text_target:
-                    shutil.copyfileobj(text_field.file, text_target)
+                audio_path.write_bytes(upload.audio.payload)
+                text_path.write_bytes(upload.text.payload)
             except OSError:
                 store.update_job(job.job_id, JobStatus.FAILED, "Upload write failed")
                 self.send_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Upload failed")
-                return
-
-            language_raw = normalize_form_value(
-                form.getvalue("language", defaults.language), defaults.language
-            )
-            try:
-                language_value = normalize_language_value(
-                    language_raw, defaults.language
-                )
-                device_value = normalize_device_value(
-                    normalize_form_value(
-                        form.getvalue("device", defaults.device), defaults.device
-                    ),
-                    defaults.device,
-                )
-            except AlignmentValidationError as exc:
-                store.update_job(job.job_id, JobStatus.FAILED, f"{exc.code}: {exc}")
-                self.send_error_response(HTTPStatus.BAD_REQUEST, str(exc))
                 return
 
             executor.submit(
@@ -1382,8 +1522,8 @@ def build_ui_handler(
                 str(audio_path),
                 str(text_path),
                 str(output_path),
-                language_value,
-                device_value,
+                upload.language,
+                upload.device,
             )
             self.send_json(HTTPStatus.OK, {"job_id": job.job_id})
 

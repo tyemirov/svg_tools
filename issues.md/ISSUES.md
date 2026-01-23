@@ -212,6 +212,8 @@ proceed
 - [x] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions. Resolved with strict dependency pins and hard failure when AudioMetaData is missing.
 - [ ] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads.
 - [x] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads. Resolved with warning filtering by message.
+- [ ] [B329] Remove deprecated cgi usage in audio_to_text UI uploads and replace with a non-deprecated multipart parser.
+- [x] [B329] Remove deprecated cgi usage in audio_to_text UI uploads and replace with a non-deprecated multipart parser. Resolved with email-based multipart parsing and strict field validation.
 
 ## Improvements Addendum (200–299)
 
