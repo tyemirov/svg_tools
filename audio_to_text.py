@@ -591,6 +591,10 @@ class JobStore:
             raise AlignmentPipelineError(
                 INVALID_JOB_RESULT_CODE, "change_id must be an integer"
             )
+        if raw_change_id < 0:
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "change_id must be non-negative"
+            )
         jobs: dict[str, AlignmentJob] = {}
         job_order: list[str] = []
         for job_id in raw_order:
