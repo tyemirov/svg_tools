@@ -20,10 +20,10 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import shutil
 import sys
-import tempfile
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -52,6 +52,8 @@ ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
 DEVICE_UNAVAILABLE_CODE = "audio_to_text.device.unavailable"
 TORCH_VERSION_CODE = "audio_to_text.dependency.torch_version"
 TORCHAUDIO_METADATA_CODE = "audio_to_text.dependency.torchaudio_metadata"
+PLATFORM_CODE = "audio_to_text.dependency.platform"
+UI_STORAGE_CODE = "audio_to_text.ui.storage"
 INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
@@ -299,6 +301,30 @@ class JobStore:
 def configure_logging() -> None:
     """Configure logging for CLI output."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def ensure_linux_runtime() -> None:
+    """Ensure the tool is running on Linux."""
+    if platform.system().lower() != "linux":
+        raise AlignmentPipelineError(
+            PLATFORM_CODE, "audio_to_text requires Linux; run via Docker"
+        )
+
+
+def resolve_ui_root_dir() -> Path:
+    """Resolve the UI uploads directory."""
+    root_dir = (
+        Path(__file__).resolve().parent
+        / "data"
+        / "audio_to_text_uploads"
+    )
+    try:
+        root_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AlignmentPipelineError(
+            UI_STORAGE_CODE, f"failed to create upload directory: {root_dir}"
+        ) from exc
+    return root_dir
 
 
 def read_utf8_text_strict(file_path: str) -> str:
@@ -1162,7 +1188,7 @@ def run_ui_server(request: AlignmentRequest) -> int:
         language=request.language,
         device=request.device,
     )
-    root_dir = Path(tempfile.mkdtemp(prefix="audio_to_text_ui_"))
+    root_dir = resolve_ui_root_dir()
     job_store = JobStore(root_dir=root_dir)
     executor = ThreadPoolExecutor(max_workers=2)
     handler = build_ui_handler(job_store, executor, defaults)
@@ -1179,7 +1205,6 @@ def run_ui_server(request: AlignmentRequest) -> int:
     finally:
         server.server_close()
         executor.shutdown(wait=False)
-        shutil.rmtree(root_dir, ignore_errors=True)
     return 0
 
 
@@ -1461,6 +1486,7 @@ def main() -> int:
     configure_logging()
     try:
         request = parse_args(sys.argv[1:])
+        ensure_linux_runtime()
         if request.mode == RequestMode.UI:
             return run_ui_server(request)
         ensure_audio_file_exists(request.input_audio or "")

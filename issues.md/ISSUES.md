@@ -212,3 +212,7 @@ proceed
 - [x] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions. Resolved with strict dependency pins and hard failure when AudioMetaData is missing.
 - [ ] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads.
 - [x] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads. Resolved with warning filtering by message.
+
+## Improvements Addendum (200–299)
+
+- [x] [I119] Restrict audio_to_text to a Linux-only Docker runtime, persist UI uploads under data/, and document container testing. Resolved with a Linux guardrail, data volume mapping, and README updates.

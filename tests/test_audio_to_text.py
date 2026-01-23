@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import platform
 import subprocess
 import wave
 from pathlib import Path
 from typing import List
+
+import pytest
+
+if platform.system().lower() != "linux":
+    pytest.skip(
+        "audio_to_text is supported on Linux only; use Docker",
+        allow_module_level=True,
+    )
 
 
 def run_audio_to_text(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
