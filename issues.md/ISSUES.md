@@ -210,3 +210,5 @@ proceed
 - [x] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text. Resolved with a fallback NamedTuple and warning log.
 - [ ] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions.
 - [x] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions. Resolved with strict dependency pins and hard failure when AudioMetaData is missing.
+- [ ] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads.
+- [x] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads. Resolved with warning filtering by message.

@@ -495,7 +495,9 @@ def load_cgi_module() -> ModuleType:
 
     with warnings.catch_warnings():
         warnings.filterwarnings(
-            "ignore", category=DeprecationWarning, module="cgi"
+            "ignore",
+            category=DeprecationWarning,
+            message=r".*'cgi' is deprecated.*",
         )
         import cgi
     return cgi
