@@ -62,7 +62,6 @@ UI_UPLOAD_BODY_CODE = "audio_to_text.ui.upload.body"
 INVALID_JOB_INPUT_CODE = "audio_to_text.job.invalid_input"
 INVALID_JOB_RESULT_CODE = "audio_to_text.job.invalid_result"
 INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
-OUTPUT_SRT_METADATA_CODE = "audio_to_text.output.invalid_metadata"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
     DEVICE_AUTO: "Auto (GPU if available)",
@@ -243,24 +242,6 @@ class AlignedWord:
 
 
 @dataclass(frozen=True)
-class SrtMetadata:
-    """Metadata to embed in generated SRT files."""
-
-    audio_filename: str
-    text_filename: str
-
-    def __post_init__(self) -> None:
-        if not self.audio_filename.strip():
-            raise AlignmentPipelineError(
-                OUTPUT_SRT_METADATA_CODE, "audio filename is required"
-            )
-        if not self.text_filename.strip():
-            raise AlignmentPipelineError(
-                OUTPUT_SRT_METADATA_CODE, "text filename is required"
-            )
-
-
-@dataclass(frozen=True)
 class UiDefaults:
     """Default configuration values for the UI."""
 
@@ -428,6 +409,137 @@ class AlignmentJob:
             )
 
 
+def parse_job_string(value: object, label: str) -> str:
+    """Parse a required string value."""
+    if not isinstance(value, str):
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"{label} must be a string"
+        )
+    return value
+
+
+def parse_job_optional_string(value: object, label: str) -> str | None:
+    """Parse an optional string value."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"{label} must be a string"
+        )
+    return value
+
+
+def parse_job_float(value: object, label: str) -> float:
+    """Parse a required numeric value."""
+    if not isinstance(value, (int, float)):
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"{label} must be a number"
+        )
+    return float(value)
+
+
+def parse_job_optional_float(value: object, label: str) -> float | None:
+    """Parse an optional numeric value."""
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)):
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"{label} must be a number"
+        )
+    return float(value)
+
+
+def parse_job_status(value: object) -> JobStatus:
+    """Parse a job status value."""
+    status_text = parse_job_string(value, "status")
+    try:
+        return JobStatus(status_text)
+    except ValueError as exc:
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"status is invalid: {status_text}"
+        ) from exc
+
+
+def parse_job_dict(value: object, label: str) -> dict[str, object]:
+    """Parse a dictionary value."""
+    if not isinstance(value, dict):
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"{label} must be a dictionary"
+        )
+    return value
+
+
+def parse_alignment_job(job_id: str, payload: object) -> AlignmentJob:
+    """Parse a persisted job payload."""
+    data = parse_job_dict(payload, "job")
+    raw_job_id = data.get("job_id")
+    if raw_job_id is not None and raw_job_id != job_id:
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE,
+            f"job id mismatch: {job_id} != {raw_job_id}",
+        )
+    created_at = parse_job_float(data.get("created_at"), "created_at")
+    input_payload = parse_job_dict(data.get("input"), "input")
+    result_payload = parse_job_dict(data.get("result"), "result")
+    job_input = AlignmentJobInput(
+        audio_filename=parse_job_string(
+            input_payload.get("audio_filename"), "audio_filename"
+        ),
+        text_filename=parse_job_string(
+            input_payload.get("text_filename"), "text_filename"
+        ),
+        language=parse_job_string(input_payload.get("language"), "language"),
+        device=parse_job_string(input_payload.get("device"), "device"),
+        audio_path=parse_job_string(input_payload.get("audio_path"), "audio_path"),
+        text_path=parse_job_string(input_payload.get("text_path"), "text_path"),
+        output_path=parse_job_string(
+            input_payload.get("output_path"), "output_path"
+        ),
+    )
+    job_result = AlignmentJobResult(
+        status=parse_job_status(result_payload.get("status")),
+        message=parse_job_optional_string(
+            result_payload.get("message"), "message"
+        ),
+        output_srt=parse_job_optional_string(
+            result_payload.get("output_srt"), "output_srt"
+        ),
+        progress=parse_job_float(result_payload.get("progress"), "progress"),
+        started_at=parse_job_optional_float(
+            result_payload.get("started_at"), "started_at"
+        ),
+        completed_at=parse_job_optional_float(
+            result_payload.get("completed_at"), "completed_at"
+        ),
+    )
+    return AlignmentJob(job_id, created_at, job_input, job_result)
+
+
+def serialize_alignment_job(job: AlignmentJob) -> dict[str, object]:
+    """Serialize a job for persistence."""
+    return {
+        "job_id": job.job_id,
+        "created_at": job.created_at,
+        "input": {
+            "audio_filename": job.job_input.audio_filename,
+            "text_filename": job.job_input.text_filename,
+            "language": job.job_input.language,
+            "device": job.job_input.device,
+            "audio_path": job.job_input.audio_path,
+            "text_path": job.job_input.text_path,
+            "output_path": job.job_input.output_path,
+        },
+        "result": {
+            "status": job.result.status.value,
+            "message": job.result.message,
+            "output_srt": job.result.output_srt,
+            "progress": job.result.progress,
+            "started_at": job.result.started_at,
+            "completed_at": job.result.completed_at,
+        },
+    }
+
+
 @dataclass
 class JobStore:
     """Thread-safe store for background UI jobs."""
@@ -435,6 +547,7 @@ class JobStore:
     root_dir: Path
     clock: Callable[[], float]
     id_factory: Callable[[], str]
+    state_path: Path = field(init=False)
     jobs: dict[str, AlignmentJob] = field(default_factory=dict)
     job_order: list[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -443,10 +556,86 @@ class JobStore:
 
     def __post_init__(self) -> None:
         self.condition = threading.Condition(self.lock)
+        self.state_path = self.root_dir / "jobs.json"
+        self.load_state()
 
     def new_job_id(self) -> str:
         """Generate a new job id."""
         return self.id_factory()
+
+    def load_state(self) -> None:
+        """Load persisted job state."""
+        if not self.state_path.exists():
+            return
+        try:
+            raw_state = json.loads(
+                self.state_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AlignmentPipelineError(
+                UI_STORAGE_CODE, f"job store load failed: {exc}"
+            ) from exc
+        state = parse_job_dict(raw_state, "job store")
+        raw_order = state.get("job_order", [])
+        raw_jobs = state.get("jobs", {})
+        raw_change_id = state.get("change_id", 0)
+        if not isinstance(raw_order, list):
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "job_order must be a list"
+            )
+        if not isinstance(raw_jobs, dict):
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "jobs must be a dictionary"
+            )
+        if not isinstance(raw_change_id, int):
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "change_id must be an integer"
+            )
+        jobs: dict[str, AlignmentJob] = {}
+        job_order: list[str] = []
+        for job_id in raw_order:
+            if not isinstance(job_id, str):
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE, "job ids must be strings"
+                )
+            if job_id not in raw_jobs:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    f"job missing from store: {job_id}",
+                )
+            job = parse_alignment_job(job_id, raw_jobs[job_id])
+            jobs[job_id] = job
+            job_order.append(job_id)
+        if set(raw_jobs.keys()) != set(job_order):
+            raise AlignmentPipelineError(
+                INVALID_JOB_RESULT_CODE, "job store entries are inconsistent"
+            )
+        with self.condition:
+            self.jobs = jobs
+            self.job_order = job_order
+            self.change_id = raw_change_id
+
+    def build_state_payload(self) -> dict[str, object]:
+        """Build the job state payload."""
+        return {
+            "change_id": self.change_id,
+            "job_order": list(self.job_order),
+            "jobs": {
+                job_id: serialize_alignment_job(job)
+                for job_id, job in self.jobs.items()
+            },
+        }
+
+    def save_state(self, payload: dict[str, object]) -> None:
+        """Persist job state to disk."""
+        temp_path = self.state_path.with_suffix(".tmp")
+        try:
+            temp_path.write_text(json.dumps(payload), encoding="utf-8")
+            temp_path.replace(self.state_path)
+        except OSError as exc:
+            raise AlignmentPipelineError(
+                UI_STORAGE_CODE, f"job store write failed: {exc}"
+            ) from exc
 
     def create_job(
         self,
@@ -473,6 +662,8 @@ class JobStore:
             self.jobs[job_id] = job
             self.job_order.append(job_id)
             self.change_id += 1
+            payload = self.build_state_payload()
+            self.save_state(payload)
             self.condition.notify_all()
         return job
 
@@ -531,6 +722,8 @@ class JobStore:
             job = AlignmentJob(job_id, current.created_at, current.job_input, result)
             self.jobs[job_id] = job
             self.change_id += 1
+            payload = self.build_state_payload()
+            self.save_state(payload)
             self.condition.notify_all()
         return job
 
@@ -1165,17 +1358,9 @@ def format_srt_timestamp(milliseconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
-def build_srt(
-    words: Sequence[AlignedWord],
-    metadata: SrtMetadata | None = None,
-) -> str:
+def build_srt(words: Sequence[AlignedWord]) -> str:
     """Build SRT content from aligned words."""
     lines: list[str] = []
-    if metadata is not None:
-        lines.append("NOTE")
-        lines.append(f"source audio: {metadata.audio_filename}")
-        lines.append(f"source text: {metadata.text_filename}")
-        lines.append("")
     for index, word in enumerate(words, start=1):
         start_ms = srt_timestamp_from_seconds(word.start_seconds, "floor")
         end_ms = srt_timestamp_from_seconds(word.end_seconds, "ceil")
@@ -2279,11 +2464,7 @@ def run_alignment_job(store: JobStore, job_id: str) -> None:
             message="Building subtitle output",
             progress=0.85,
         )
-        metadata = SrtMetadata(
-            audio_filename=job_input.audio_filename,
-            text_filename=job_input.text_filename,
-        )
-        srt_content = build_srt(words, metadata)
+        srt_content = build_srt(words)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
@@ -2341,11 +2522,7 @@ def main() -> int:
             request.language,
             resolved_device,
         )
-        metadata = SrtMetadata(
-            audio_filename=Path(request.input_audio or "").name,
-            text_filename=Path(request.input_text or "").name,
-        )
-        srt_content = build_srt(words, metadata)
+        srt_content = build_srt(words)
         write_srt_file(request.output_srt or "", srt_content)
         LOGGER.info("audio_to_text.output.srt_written: %s", request.output_srt)
         return 0

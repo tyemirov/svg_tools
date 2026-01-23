@@ -234,3 +234,4 @@ proceed
 - [x] [I120] Replace audio_to_text UI polling with SSE job updates. Resolved with EventSource streaming and a new SSE endpoint.
 - [x] [I121] Add a smoother alignment progress signal for the audio_to_text UI. Resolved with time-based progress updates emitted during alignment.
 - [x] [I122] Stack audio_to_text UI jobs with per-job downloads and embed input metadata in generated SRT files. Resolved with queued job tracking, SSE list updates, and SRT metadata headers.
+- [x] [I123] Remove SRT metadata headers and persist UI job lists for audio_to_text. Resolved with job store persistence and job list streaming without SRT annotations.
