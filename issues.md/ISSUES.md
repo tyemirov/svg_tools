@@ -218,6 +218,9 @@ proceed
 ## Improvements Addendum (200–299)
 
 - [x] [I119] Restrict audio_to_text to a Linux-only Docker runtime, persist UI uploads under data/, and document container testing. Resolved with a Linux guardrail, data volume mapping, and README updates.
+- [x] [I124] Allow deleting completed audio_to_text UI jobs. Resolved with a trash icon action, DELETE endpoint, persisted job store removal, and integration coverage for the API.
+- [x] [I125] Allow deleting failed audio_to_text UI jobs. Resolved by widening deletion to finished jobs (completed/failed) and extending integration coverage.
+- [x] [I126] Name audio_to_text SRT downloads after the input audio/video file. Resolved by using the input filename for the stored output path and Content-Disposition header.
 
 ## Maintenance Addendum (400–499)
 
@@ -235,3 +238,8 @@ proceed
 - [x] [I121] Add a smoother alignment progress signal for the audio_to_text UI. Resolved with time-based progress updates emitted during alignment.
 - [x] [I122] Stack audio_to_text UI jobs with per-job downloads and embed input metadata in generated SRT files. Resolved with queued job tracking, SSE list updates, and SRT metadata headers.
 - [x] [I123] Remove SRT metadata headers and persist UI job lists for audio_to_text. Resolved with job store persistence and job list streaming without SRT annotations.
+
+## BugFixes Addendum (300–399)
+
+- [x] [B331] Fix audio_to_text alignment failures when whisperx emits punctuation tokens (e.g., em dash) without timestamps. Resolved by merging punctuation into neighboring word cues, capturing Python warnings via logging, and adding integration coverage via `--input-alignment-json`.
+- [x] [B332] Fix audio_to_text alignment failures when whisperx emits non-punctuation tokens without timestamps (e.g. single letters or full words). Resolved by inferring token timings from segment bounds, keeping punctuation-merging behavior, and extending integration coverage via `--input-alignment-json`.

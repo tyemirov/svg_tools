@@ -11,4 +11,5 @@ services:
       - ../../:/app
       - ../../data:/app/data
       - ../../data/hf-cache:/opt/hf-cache
+      - ../../data/torch-cache:/opt/torch-cache
     command: ["--ui", "--ui-host", "0.0.0.0", "--ui-port", "7865"]
