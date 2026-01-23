@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
 from types import ModuleType
-from typing import Iterable, Sequence
+from typing import Iterable, NamedTuple, Sequence
 from urllib.parse import urlparse
 
 
@@ -456,9 +456,16 @@ def ensure_torchaudio_metadata() -> None:
         if audio_metadata_type is not None:
             break
     if audio_metadata_type is None:
-        raise AlignmentPipelineError(
-            ALIGNMENT_CODE,
-            "torchaudio is missing AudioMetaData; upgrade torchaudio",
+        class AudioMetaData(NamedTuple):
+            sample_rate: int
+            num_frames: int
+            num_channels: int
+            bits_per_sample: int
+            encoding: str
+
+        audio_metadata_type = AudioMetaData
+        LOGGER.warning(
+            "audio_to_text.dependency.torchaudio_metadata: using fallback AudioMetaData"
         )
     setattr(torchaudio, "AudioMetaData", audio_metadata_type)
 

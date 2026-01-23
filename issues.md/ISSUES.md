@@ -206,3 +206,5 @@ proceed
 - [x] [B323] Fix audio_to_text HF alignment model load failures on Intel macOS by using safetensors-backed defaults (Russian) and conditional torch version checks. Resolved with RU safetensors override, conditional torch>=2.6 enforcement, and docs update.
 - [ ] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import.
 - [x] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import. Resolved with lazy whisperx import and torchaudio AudioMetaData patching.
+- [ ] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text.
+- [x] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text. Resolved with a fallback NamedTuple and warning log.
