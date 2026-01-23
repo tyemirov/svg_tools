@@ -208,3 +208,5 @@ proceed
 - [x] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import. Resolved with lazy whisperx import and torchaudio AudioMetaData patching.
 - [ ] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text.
 - [x] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text. Resolved with a fallback NamedTuple and warning log.
+- [ ] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions.
+- [x] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions. Resolved with strict dependency pins and hard failure when AudioMetaData is missing.

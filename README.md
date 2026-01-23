@@ -275,6 +275,7 @@ The UI provides separate dropzones for audio/video and transcript text, runs ali
 
 **Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
 **Torch requirement:** Hugging Face alignment models stored as `.bin` require torch >= 2.6; torchaudio-backed languages and safetensors-backed overrides (for example Russian) can run on older torch versions.
+**Torchaudio requirement:** torchaudio >= 2.6 is required for AudioMetaData support used by whisperx (enforced for Linux container builds).
 
 **Docker (Linux)**
 

@@ -6,6 +6,8 @@
 #   "matplotlib<4",
 #   "numpy<2",
 #   "safetensors",
+#   "torch>=2.6,<2.7; platform_system == 'Linux'",
+#   "torchaudio>=2.6,<2.7; platform_system == 'Linux'",
 # ]
 # ///
 """Force-align audio or video to input text and emit SRT."""
@@ -33,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
 from types import ModuleType
-from typing import Iterable, NamedTuple, Sequence
+from typing import Iterable, Sequence
 from urllib.parse import urlparse
 
 
@@ -49,6 +51,7 @@ ALIGNMENT_CODE = "audio_to_text.align.failed"
 ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
 DEVICE_UNAVAILABLE_CODE = "audio_to_text.device.unavailable"
 TORCH_VERSION_CODE = "audio_to_text.dependency.torch_version"
+TORCHAUDIO_METADATA_CODE = "audio_to_text.dependency.torchaudio_metadata"
 INVALID_PROGRESS_CODE = "audio_to_text.job.invalid_progress"
 DEVICE_AUTO = "auto"
 DEVICE_LABELS = {
@@ -456,16 +459,9 @@ def ensure_torchaudio_metadata() -> None:
         if audio_metadata_type is not None:
             break
     if audio_metadata_type is None:
-        class AudioMetaData(NamedTuple):
-            sample_rate: int
-            num_frames: int
-            num_channels: int
-            bits_per_sample: int
-            encoding: str
-
-        audio_metadata_type = AudioMetaData
-        LOGGER.warning(
-            "audio_to_text.dependency.torchaudio_metadata: using fallback AudioMetaData"
+        raise AlignmentPipelineError(
+            TORCHAUDIO_METADATA_CODE,
+            "torchaudio is missing AudioMetaData; install torchaudio>=2.6",
         )
     setattr(torchaudio, "AudioMetaData", audio_metadata_type)
 
