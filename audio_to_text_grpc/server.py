@@ -4,36 +4,62 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import logging
 import os
-import re
-import subprocess
 import tempfile
-import unicodedata
+import threading
+import time
+import uuid
 import wave
+import sys
 from concurrent import futures
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Callable, Iterator, Sequence
 
 import grpc
+from grpc_health.v1 import health as grpc_health
+from grpc_health.v1 import health_pb2
+from grpc_health.v1 import health_pb2_grpc
 
+import audio_to_text
 from audio_to_text_grpc import audio_to_text_grpc_pb2
 from audio_to_text_grpc import audio_to_text_grpc_pb2_grpc
+
+LOGGER = logging.getLogger("audio_to_text_grpc")
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 50051
 DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_AUDIO_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_TRANSCRIPT_CHARS = 200_000
+DEFAULT_MAX_TRANSCRIPT_WORDS = 50_000
 DEFAULT_MAX_WORKERS = 4
+DEFAULT_ALIGNMENT_TIMEOUT_SECONDS = 300.0
 
 TEST_MODE_ENV = "AUDIO_TO_TEXT_GRPC_TEST_MODE"
+TEST_DELAY_ENV = "AUDIO_TO_TEXT_GRPC_TEST_DELAY_MS"
+AUTH_TOKEN_ENV = "AUDIO_TO_TEXT_GRPC_AUTH_TOKEN"
+MAX_AUDIO_BYTES_ENV = "AUDIO_TO_TEXT_GRPC_MAX_AUDIO_BYTES"
+MAX_TRANSCRIPT_CHARS_ENV = "AUDIO_TO_TEXT_GRPC_MAX_TRANSCRIPT_CHARS"
+MAX_TRANSCRIPT_WORDS_ENV = "AUDIO_TO_TEXT_GRPC_MAX_TRANSCRIPT_WORDS"
+MAX_INFLIGHT_ENV = "AUDIO_TO_TEXT_GRPC_MAX_INFLIGHT"
+ALIGNMENT_TIMEOUT_ENV = "AUDIO_TO_TEXT_GRPC_ALIGNMENT_TIMEOUT_SECONDS"
+TLS_CERT_ENV = "AUDIO_TO_TEXT_GRPC_TLS_CERT"
+TLS_KEY_ENV = "AUDIO_TO_TEXT_GRPC_TLS_KEY"
+LOG_LEVEL_ENV = "AUDIO_TO_TEXT_GRPC_LOG_LEVEL"
 
 INVALID_ARGUMENT_CODE = "audio_to_text_grpc.input.invalid_argument"
 MISSING_INIT_CODE = "audio_to_text_grpc.input.missing_init"
 INVALID_WAV_CODE = "audio_to_text_grpc.input.invalid_wav"
+INPUT_AUDIO_TOO_LARGE_CODE = "audio_to_text_grpc.input.audio_too_large"
+INPUT_TEXT_TOO_LARGE_CODE = "audio_to_text_grpc.input.text_too_large"
+INPUT_TEXT_TOO_LONG_CODE = "audio_to_text_grpc.input.text_too_long"
+AUTH_REQUIRED_CODE = "audio_to_text_grpc.auth.required"
+INFLIGHT_LIMIT_CODE = "audio_to_text_grpc.request.inflight_limit"
+DEADLINE_EXCEEDED_CODE = "audio_to_text_grpc.request.deadline_exceeded"
+REQUEST_CANCELLED_CODE = "audio_to_text_grpc.request.cancelled"
+ALIGNMENT_TIMEOUT_CODE = "audio_to_text_grpc.align.timeout"
 ALIGNMENT_FAILED_CODE = "audio_to_text_grpc.align.failed"
-
-SRT_TIME_RANGE_PATTERN = re.compile(
-    r"^(?P<start>\\d{2}:\\d{2}:\\d{2},\\d{3})\\s*-->\\s*(?P<end>\\d{2}:\\d{2}:\\d{2},\\d{3})$"
-)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,24 +69,109 @@ class AlignRequest:
     wav_path: Path
     transcript: str
     language: str
-    punctuation_mode: audio_to_text_grpc_pb2.PunctuationMode.ValueType
+    remove_punctuation: bool
     audio_filename: str
+    audio_bytes: int
 
 
 @dataclasses.dataclass(frozen=True)
-class AlignedWord:
-    """Single aligned word with timestamps."""
+class MetricsSnapshot:
+    """Snapshot of server metrics."""
 
-    text: str
-    start_seconds: float
-    end_seconds: float
+    requests_total: int
+    requests_succeeded: int
+    requests_failed: int
+    inflight: int
+    bytes_received: int
+    uptime_seconds: float
+    average_latency_seconds: float
+    max_latency_seconds: float
 
 
-class GrpcValidationError(ValueError):
-    """Validation error for gRPC input."""
+@dataclasses.dataclass
+class MetricsRegistry:
+    """Thread-safe metrics registry."""
 
-    def __init__(self, code: str, message: str) -> None:
+    started_at: float
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    requests_total: int = 0
+    requests_succeeded: int = 0
+    requests_failed: int = 0
+    inflight: int = 0
+    bytes_received: int = 0
+    total_latency_seconds: float = 0.0
+    max_latency_seconds: float = 0.0
+
+    def record_start(self) -> None:
+        """Record a new request start."""
+        with self.lock:
+            self.requests_total += 1
+            self.inflight += 1
+
+    def record_bytes(self, audio_bytes: int) -> None:
+        """Record bytes received for a request."""
+        with self.lock:
+            self.bytes_received += audio_bytes
+
+    def record_finish(self, success: bool, latency_seconds: float) -> None:
+        """Record a request completion."""
+        with self.lock:
+            self.inflight -= 1
+            if success:
+                self.requests_succeeded += 1
+            else:
+                self.requests_failed += 1
+            self.total_latency_seconds += latency_seconds
+            if latency_seconds > self.max_latency_seconds:
+                self.max_latency_seconds = latency_seconds
+
+    def snapshot(self, clock: Callable[[], float]) -> MetricsSnapshot:
+        """Return a consistent snapshot of metrics."""
+        with self.lock:
+            uptime = max(0.0, clock() - self.started_at)
+            average_latency = (
+                self.total_latency_seconds / self.requests_total
+                if self.requests_total
+                else 0.0
+            )
+            return MetricsSnapshot(
+                requests_total=self.requests_total,
+                requests_succeeded=self.requests_succeeded,
+                requests_failed=self.requests_failed,
+                inflight=self.inflight,
+                bytes_received=self.bytes_received,
+                uptime_seconds=uptime,
+                average_latency_seconds=average_latency,
+                max_latency_seconds=self.max_latency_seconds,
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class ServerConfig:
+    """Server configuration."""
+
+    host: str
+    port: int
+    max_message_bytes: int
+    max_workers: int
+    max_audio_bytes: int
+    max_transcript_chars: int
+    max_transcript_words: int
+    max_inflight: int
+    alignment_timeout_seconds: float
+    auth_token: str | None
+    test_mode: bool
+    test_delay_seconds: float
+    tls_cert_path: Path | None
+    tls_key_path: Path | None
+
+
+class GrpcRequestError(RuntimeError):
+    """Request-level error with gRPC status."""
+
+    def __init__(self, status: grpc.StatusCode, code: str, message: str) -> None:
         super().__init__(message)
+        self.status = status
         self.code = code
 
 
@@ -71,59 +182,114 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--max-message-bytes", type=int, default=DEFAULT_MAX_MESSAGE_BYTES)
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
+    parser.add_argument("--max-audio-bytes", type=int, default=None)
+    parser.add_argument("--max-transcript-chars", type=int, default=None)
+    parser.add_argument("--max-transcript-words", type=int, default=None)
+    parser.add_argument("--max-inflight", type=int, default=None)
+    parser.add_argument("--alignment-timeout-seconds", type=float, default=None)
+    parser.add_argument("--auth-token", default=None)
+    parser.add_argument("--tls-cert", default=None)
+    parser.add_argument("--tls-key", default=None)
     return parser.parse_args(list(argv))
 
 
-def is_test_mode() -> bool:
+def configure_logging(env: dict[str, str]) -> None:
+    """Configure logging from environment."""
+    level_name = env.get(LOG_LEVEL_ENV, "INFO").strip().upper()
+    level = logging.INFO
+    if level_name == "DEBUG":
+        level = logging.DEBUG
+    elif level_name == "WARNING":
+        level = logging.WARNING
+    elif level_name == "ERROR":
+        level = logging.ERROR
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+
+def parse_positive_int(raw_value: str, field_name: str) -> int:
+    """Parse a positive integer from a string."""
+    try:
+        parsed = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be positive")
+    return parsed
+
+
+def parse_non_negative_float(raw_value: str, field_name: str) -> float:
+    """Parse a non-negative float from a string."""
+    try:
+        parsed = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+    return parsed
+
+
+def read_env_int(
+    env: dict[str, str], key: str, field_name: str, fallback: int | None
+) -> int | None:
+    """Read an integer from the environment."""
+    raw_value = env.get(key, "").strip()
+    if not raw_value:
+        return fallback
+    return parse_positive_int(raw_value, field_name)
+
+
+def read_env_float(
+    env: dict[str, str], key: str, field_name: str, fallback: float | None
+) -> float | None:
+    """Read a float from the environment."""
+    raw_value = env.get(key, "").strip()
+    if not raw_value:
+        return fallback
+    return parse_non_negative_float(raw_value, field_name)
+
+
+def resolve_optional_path(raw_value: str | None, field_name: str) -> Path | None:
+    """Resolve a filesystem path from an optional value."""
+    if raw_value is None:
+        return None
+    trimmed = raw_value.strip()
+    if not trimmed:
+        raise ValueError(f"{field_name} must be non-empty when set")
+    return Path(trimmed)
+
+
+def is_test_mode(env: dict[str, str]) -> bool:
     """Return True when test-mode is enabled."""
-    raw = os.environ.get(TEST_MODE_ENV, "")
+    raw = env.get(TEST_MODE_ENV, "")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def normalize_language(raw_value: str, transcript: str) -> str:
-    """Normalize an alignment language code, defaulting by transcript heuristic."""
-    normalized = raw_value.strip().lower()
-    if normalized:
-        return normalized
+def detect_default_language(transcript: str) -> str:
+    """Detect a default language from the transcript text."""
     if any("\u0400" <= character <= "\u04ff" for character in transcript):
         return "ru"
     return "en"
 
 
-def remove_punctuation_from_transcript(text_value: str) -> str:
-    """Replace punctuation characters with spaces."""
-    replaced: list[str] = []
-    for character in text_value:
-        if unicodedata.category(character).startswith("P"):
-            replaced.append(" ")
-        else:
-            replaced.append(character)
-    return "".join(replaced)
+def resolve_language(raw_value: str, transcript: str) -> str:
+    """Resolve and validate a language code."""
+    default_language = detect_default_language(transcript)
+    try:
+        return audio_to_text.normalize_language_value(raw_value, default_language)
+    except audio_to_text.AlignmentValidationError as exc:
+        raise GrpcRequestError(grpc.StatusCode.INVALID_ARGUMENT, exc.code, str(exc))
 
 
-def normalize_transcript(text_value: str) -> str:
-    """Normalize transcript text for alignment work."""
-    without_bom = text_value.replace("\ufeff", "")
-    normalized = " ".join(without_bom.split())
-    if not normalized:
-        raise GrpcValidationError(INVALID_ARGUMENT_CODE, "input text contains no words")
-    return normalized
-
-
-def normalize_transcript_for_alignment(
-    text_value: str, punctuation_mode: audio_to_text_grpc_pb2.PunctuationMode.ValueType
-) -> str:
-    """Normalize transcript text and optionally strip punctuation."""
-    normalized = normalize_transcript(text_value)
+def resolve_remove_punctuation(
+    punctuation_mode: audio_to_text_grpc_pb2.PunctuationMode.ValueType,
+) -> bool:
+    """Map punctuation mode to a boolean removal flag."""
     if punctuation_mode == audio_to_text_grpc_pb2.PUNCTUATION_MODE_KEEP:
-        return normalized
-    stripped = " ".join(remove_punctuation_from_transcript(normalized).split())
-    if not stripped:
-        raise GrpcValidationError(
-            INVALID_ARGUMENT_CODE,
-            "input text contains no words after punctuation removal",
-        )
-    return stripped
+        return False
+    return True
 
 
 def validate_wav(path: Path) -> None:
@@ -132,175 +298,264 @@ def validate_wav(path: Path) -> None:
         with wave.open(str(path), "rb") as wav_file:
             wav_file.getnchannels()
     except wave.Error as exc:
-        raise GrpcValidationError(INVALID_WAV_CODE, f"invalid wav: {exc}") from exc
+        raise GrpcRequestError(
+            grpc.StatusCode.INVALID_ARGUMENT, INVALID_WAV_CODE, f"invalid wav: {exc}"
+        ) from exc
 
 
-def srt_timestamp_to_seconds(timestamp: str) -> float:
-    """Convert an SRT timestamp (HH:MM:SS,mmm) to seconds."""
-    hours_str, minutes_str, rest = timestamp.split(":")
-    seconds_str, milliseconds_str = rest.split(",")
-    hours = int(hours_str)
-    minutes = int(minutes_str)
-    seconds = int(seconds_str)
-    milliseconds = int(milliseconds_str)
-    return hours * 3600.0 + minutes * 60.0 + seconds + milliseconds / 1000.0
-
-
-def parse_word_level_srt(srt_text: str) -> list[AlignedWord]:
-    """Parse an SRT produced by audio_to_text.py into aligned words."""
-    words: list[AlignedWord] = []
-    blocks = re.split(r"(?:\\r?\\n){2,}", srt_text.strip())
-    for block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if len(lines) < 3:
-            continue
-        time_match = SRT_TIME_RANGE_PATTERN.fullmatch(lines[1])
-        if time_match is None:
-            continue
-        start_seconds = srt_timestamp_to_seconds(time_match.group("start"))
-        end_seconds = srt_timestamp_to_seconds(time_match.group("end"))
-        text_value = " ".join(lines[2:])
-        words.append(
-            AlignedWord(
-                text=text_value,
-                start_seconds=start_seconds,
-                end_seconds=end_seconds,
-            )
-        )
-    return words
-
-
-def build_word_level_srt(words: Sequence[AlignedWord]) -> str:
-    """Build a word-level SRT string from aligned words."""
-    lines: list[str] = []
-    for index, word in enumerate(words, start=1):
-        lines.append(str(index))
-        lines.append(f"{format_srt_time(word.start_seconds)} --> {format_srt_time(word.end_seconds)}")
-        lines.append(word.text)
-        lines.append("")
-    return "\n".join(lines).strip() + "\n"
-
-
-def format_srt_time(seconds: float) -> str:
-    """Format seconds into an SRT timestamp string."""
-    total_ms = int(round(seconds * 1000.0))
-    hours = total_ms // 3_600_000
-    total_ms %= 3_600_000
-    minutes = total_ms // 60_000
-    total_ms %= 60_000
-    secs = total_ms // 1000
-    ms = total_ms % 1000
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
-
-
-def split_transcript_words(transcript: str) -> list[str]:
-    """Split transcript into word tokens."""
-    return [token for token in transcript.split() if token]
-
-
-def align_in_test_mode(
-    transcript: str,
-    audio_filename: str,
-) -> tuple[list[AlignedWord], str]:
-    """Return a deterministic fake alignment for integration tests."""
-    words = split_transcript_words(transcript)
-    aligned: list[AlignedWord] = []
-    cursor = 0.0
-    step = 0.25
-    for token in words:
-        aligned.append(
-            AlignedWord(text=token, start_seconds=cursor, end_seconds=cursor + step)
-        )
-        cursor += step
-    return aligned, build_word_level_srt(aligned)
-
-
-def run_audio_to_text_cli(
-    wav_path: Path,
-    transcript_path: Path,
-    output_srt_path: Path,
-    language: str,
-) -> str:
-    """Invoke audio_to_text.py CLI to produce an SRT file."""
-    repo_root = Path(__file__).resolve().parents[1]
-    script_path = repo_root / "audio_to_text.py"
-    process = subprocess.run(
-        [
-            str(script_path),
-            "--input-audio",
-            str(wav_path),
-            "--input-text",
-            str(transcript_path),
-            "--output-srt",
-            str(output_srt_path),
-            "--language",
-            language,
-        ],
-        cwd=repo_root,
-        text=True,
-        capture_output=True,
-        check=False,
+def load_config(args: argparse.Namespace, env: dict[str, str]) -> ServerConfig:
+    """Load server configuration from args and environment."""
+    max_audio_bytes = read_env_int(
+        env, MAX_AUDIO_BYTES_ENV, "max-audio-bytes", DEFAULT_MAX_AUDIO_BYTES
     )
-    if process.returncode != 0:
-        stderr = process.stderr.strip() or process.stdout.strip()
-        raise RuntimeError(stderr or "audio_to_text.py failed")
-    return output_srt_path.read_text(encoding="utf-8")
+    if args.max_audio_bytes is not None:
+        max_audio_bytes = args.max_audio_bytes
+    if max_audio_bytes is None or max_audio_bytes <= 0:
+        raise ValueError("max-audio-bytes must be positive")
+
+    max_transcript_chars = read_env_int(
+        env,
+        MAX_TRANSCRIPT_CHARS_ENV,
+        "max-transcript-chars",
+        DEFAULT_MAX_TRANSCRIPT_CHARS,
+    )
+    if args.max_transcript_chars is not None:
+        max_transcript_chars = args.max_transcript_chars
+    if max_transcript_chars is None or max_transcript_chars <= 0:
+        raise ValueError("max-transcript-chars must be positive")
+
+    max_transcript_words = read_env_int(
+        env,
+        MAX_TRANSCRIPT_WORDS_ENV,
+        "max-transcript-words",
+        DEFAULT_MAX_TRANSCRIPT_WORDS,
+    )
+    if args.max_transcript_words is not None:
+        max_transcript_words = args.max_transcript_words
+    if max_transcript_words is None or max_transcript_words <= 0:
+        raise ValueError("max-transcript-words must be positive")
+
+    max_inflight = read_env_int(env, MAX_INFLIGHT_ENV, "max-inflight", None)
+    if args.max_inflight is not None:
+        max_inflight = args.max_inflight
+    if max_inflight is None:
+        max_inflight = args.max_workers
+    if max_inflight <= 0:
+        raise ValueError("max-inflight must be positive")
+
+    alignment_timeout = read_env_float(
+        env,
+        ALIGNMENT_TIMEOUT_ENV,
+        "alignment-timeout-seconds",
+        DEFAULT_ALIGNMENT_TIMEOUT_SECONDS,
+    )
+    if args.alignment_timeout_seconds is not None:
+        alignment_timeout = args.alignment_timeout_seconds
+    if alignment_timeout is None or alignment_timeout < 0:
+        raise ValueError("alignment-timeout-seconds must be non-negative")
+
+    auth_token = args.auth_token
+    if auth_token is None:
+        auth_token = env.get(AUTH_TOKEN_ENV, "").strip() or None
+
+    test_delay_ms = read_env_float(env, TEST_DELAY_ENV, "test-delay-ms", 0.0) or 0.0
+    test_delay_seconds = test_delay_ms / 1000.0
+
+    tls_cert_path = resolve_optional_path(
+        args.tls_cert or env.get(TLS_CERT_ENV), "tls-cert"
+    )
+    tls_key_path = resolve_optional_path(
+        args.tls_key or env.get(TLS_KEY_ENV), "tls-key"
+    )
+    if (tls_cert_path is None) ^ (tls_key_path is None):
+        raise ValueError("tls-cert and tls-key must be provided together")
+
+    return ServerConfig(
+        host=str(args.host),
+        port=int(args.port),
+        max_message_bytes=int(args.max_message_bytes),
+        max_workers=int(args.max_workers),
+        max_audio_bytes=int(max_audio_bytes),
+        max_transcript_chars=int(max_transcript_chars),
+        max_transcript_words=int(max_transcript_words),
+        max_inflight=int(max_inflight),
+        alignment_timeout_seconds=float(alignment_timeout),
+        auth_token=auth_token,
+        test_mode=is_test_mode(env),
+        test_delay_seconds=float(test_delay_seconds),
+        tls_cert_path=tls_cert_path,
+        tls_key_path=tls_key_path,
+    )
+
+
+def build_server_credentials(config: ServerConfig) -> grpc.ServerCredentials | None:
+    """Build TLS credentials when configured."""
+    if config.tls_cert_path is None or config.tls_key_path is None:
+        return None
+    certificate_bytes = config.tls_cert_path.read_bytes()
+    key_bytes = config.tls_key_path.read_bytes()
+    return grpc.ssl_server_credentials(((key_bytes, certificate_bytes),))
+
+
+def ensure_deadline(context: grpc.ServicerContext) -> None:
+    """Ensure the request deadline has not expired."""
+    if not context.is_active():
+        raise GrpcRequestError(
+            grpc.StatusCode.CANCELLED,
+            REQUEST_CANCELLED_CODE,
+            "request cancelled",
+        )
+    remaining = context.time_remaining()
+    if remaining is not None and remaining <= 0:
+        raise GrpcRequestError(
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            DEADLINE_EXCEEDED_CODE,
+            "request deadline exceeded",
+        )
 
 
 def collect_request(
     request_iterator: Iterator[audio_to_text_grpc_pb2.AlignChunk],
+    config: ServerConfig,
+    context: grpc.ServicerContext,
     temp_root: Path,
 ) -> AlignRequest:
-    """Collect a streaming request into temporary files and validated fields."""
+    """Collect a streaming request into a temporary WAV file."""
+    ensure_deadline(context)
     first = next(request_iterator, None)
     if first is None or first.WhichOneof("payload") != "init":
-        raise GrpcValidationError(
-            MISSING_INIT_CODE, "first message must contain init payload"
+        raise GrpcRequestError(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            MISSING_INIT_CODE,
+            "first message must contain init payload",
         )
-    init = first.init
-    punctuation_mode = init.punctuation
-    if punctuation_mode == audio_to_text_grpc_pb2.PUNCTUATION_MODE_UNSPECIFIED:
-        punctuation_mode = audio_to_text_grpc_pb2.PUNCTUATION_MODE_REMOVE
 
+    init = first.init
     transcript_raw = init.transcript
     if not transcript_raw.strip():
-        raise GrpcValidationError(INVALID_ARGUMENT_CODE, "transcript is required")
+        raise GrpcRequestError(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            INVALID_ARGUMENT_CODE,
+            "transcript is required",
+        )
+    remove_punctuation = resolve_remove_punctuation(init.punctuation)
+    try:
+        normalized_transcript = audio_to_text.normalize_transcript_for_alignment(
+            transcript_raw,
+            "input.txt",
+            remove_punctuation=remove_punctuation,
+        )
+    except audio_to_text.AlignmentValidationError as exc:
+        raise GrpcRequestError(grpc.StatusCode.INVALID_ARGUMENT, exc.code, str(exc))
 
-    audio_filename = init.audio_filename.strip()
+    if len(normalized_transcript) > config.max_transcript_chars:
+        raise GrpcRequestError(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            INPUT_TEXT_TOO_LARGE_CODE,
+            "transcript exceeds max length",
+        )
+
+    normalized_word_count = len(normalized_transcript.split())
+    if normalized_word_count > config.max_transcript_words:
+        raise GrpcRequestError(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            INPUT_TEXT_TOO_LONG_CODE,
+            "transcript exceeds max word count",
+        )
+
+    language = resolve_language(init.language, normalized_transcript)
+
     wav_path = temp_root / "input.wav"
-    transcript_path = temp_root / "transcript.txt"
+    audio_bytes = 0
     with wav_path.open("wb") as wav_file:
-        byte_count = 0
         for message in request_iterator:
+            ensure_deadline(context)
             if message.WhichOneof("payload") != "wav_chunk":
-                raise GrpcValidationError(
-                    INVALID_ARGUMENT_CODE, "unexpected message in stream"
+                raise GrpcRequestError(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    INVALID_ARGUMENT_CODE,
+                    "unexpected message in stream",
                 )
             chunk = bytes(message.wav_chunk)
             if not chunk:
                 continue
+            audio_bytes += len(chunk)
+            if audio_bytes > config.max_audio_bytes:
+                raise GrpcRequestError(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    INPUT_AUDIO_TOO_LARGE_CODE,
+                    "audio exceeds max bytes",
+                )
             wav_file.write(chunk)
-            byte_count += len(chunk)
 
-    if byte_count <= 0:
-        raise GrpcValidationError(INVALID_WAV_CODE, "audio stream contained no bytes")
+    if audio_bytes <= 0:
+        raise GrpcRequestError(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            INVALID_WAV_CODE,
+            "audio stream contained no bytes",
+        )
+
     validate_wav(wav_path)
-    normalized_transcript = normalize_transcript_for_alignment(
-        transcript_raw, punctuation_mode
-    )
-    transcript_path.write_text(normalized_transcript, encoding="utf-8")
-    language = normalize_language(init.language, normalized_transcript)
     return AlignRequest(
         wav_path=wav_path,
         transcript=normalized_transcript,
         language=language,
-        punctuation_mode=punctuation_mode,
-        audio_filename=audio_filename,
+        remove_punctuation=remove_punctuation,
+        audio_filename=init.audio_filename.strip(),
+        audio_bytes=audio_bytes,
+    )
+
+
+def align_in_test_mode(
+    transcript: str, delay_seconds: float, sleep: Callable[[float], None]
+) -> list[audio_to_text.AlignedWord]:
+    """Return deterministic fake alignment for integration tests."""
+    if delay_seconds > 0:
+        sleep(delay_seconds)
+    aligned: list[audio_to_text.AlignedWord] = []
+    cursor = 0.0
+    step = 0.25
+    for token in transcript.split():
+        aligned.append(
+            audio_to_text.AlignedWord(
+                text=token,
+                start_seconds=cursor,
+                end_seconds=cursor + step,
+            )
+        )
+        cursor += step
+    return aligned
+
+
+def align_in_process(request: AlignRequest) -> list[audio_to_text.AlignedWord]:
+    """Run whisperx alignment in-process."""
+    device = audio_to_text.resolve_device(audio_to_text.DEVICE_AUTO)
+    return audio_to_text.align_words(
+        str(request.wav_path),
+        request.transcript,
+        request.language,
+        device,
+        remove_punctuation=request.remove_punctuation,
     )
 
 
 class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
     """gRPC service implementation."""
+
+    def __init__(
+        self,
+        config: ServerConfig,
+        metrics: MetricsRegistry,
+        clock: Callable[[], float],
+        sleep: Callable[[float], None],
+        alignment_executor: futures.Executor,
+    ) -> None:
+        self._config = config
+        self._metrics = metrics
+        self._clock = clock
+        self._sleep = sleep
+        self._alignment_executor = alignment_executor
+        self._inflight_semaphore = threading.BoundedSemaphore(config.max_inflight)
 
     def Align(
         self,
@@ -308,43 +563,36 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         context: grpc.ServicerContext,
     ) -> audio_to_text_grpc_pb2.AlignResponse:
         """Align a transcript to a streamed WAV."""
-        with tempfile.TemporaryDirectory(prefix="audio_to_text_grpc_") as temp_dir:
-            temp_root = Path(temp_dir)
-            try:
-                request = collect_request(request_iterator, temp_root=temp_root)
-            except GrpcValidationError as exc:
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"{exc.code}: {exc}")
-            except Exception as exc:
-                context.abort(
-                    grpc.StatusCode.INTERNAL, f"{INVALID_ARGUMENT_CODE}: {exc}"
-                )
+        if not self._inflight_semaphore.acquire(blocking=False):
+            context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"{INFLIGHT_LIMIT_CODE}: too many concurrent requests",
+            )
 
-            try:
-                if is_test_mode():
-                    aligned_words, srt_text = align_in_test_mode(
-                        request.transcript, request.audio_filename
-                    )
-                else:
-                    output_srt_path = temp_root / "alignment.srt"
-                    transcript_path = temp_root / "transcript.txt"
-                    transcript_path.write_text(request.transcript, encoding="utf-8")
-                    srt_text = run_audio_to_text_cli(
-                        request.wav_path,
-                        transcript_path,
-                        output_srt_path,
-                        request.language,
-                    )
-                    aligned_words = parse_word_level_srt(srt_text)
-            except RuntimeError as exc:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    f"{ALIGNMENT_FAILED_CODE}: {exc}",
+        request_id = uuid.uuid4().hex
+        start_time = self._clock()
+        success = False
+        metrics_started = False
+        try:
+            self._metrics.record_start()
+            metrics_started = True
+            self._authorize(context)
+            with tempfile.TemporaryDirectory(prefix="audio_to_text_grpc_") as temp_dir:
+                temp_root = Path(temp_dir)
+                request = collect_request(
+                    request_iterator, self._config, context, temp_root
                 )
-            except Exception as exc:
-                context.abort(
-                    grpc.StatusCode.INTERNAL, f"{ALIGNMENT_FAILED_CODE}: {exc}"
+                self._metrics.record_bytes(request.audio_bytes)
+                LOGGER.info(
+                    "audio_to_text_grpc.request.started id=%s bytes=%s language=%s",
+                    request_id,
+                    request.audio_bytes,
+                    request.language,
                 )
-
+                ensure_deadline(context)
+                aligned_words = self._run_alignment(request, context)
+                ensure_deadline(context)
+                srt_text = audio_to_text.build_srt(aligned_words)
             response_words = [
                 audio_to_text_grpc_pb2.AlignedWord(
                     text=word.text,
@@ -353,39 +601,185 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                 )
                 for word in aligned_words
             ]
+            success = True
             return audio_to_text_grpc_pb2.AlignResponse(
                 words=response_words,
                 srt=srt_text,
                 audio_filename=request.audio_filename,
             )
+        except GrpcRequestError as exc:
+            LOGGER.warning(
+                "audio_to_text_grpc.request.failed id=%s code=%s status=%s",
+                request_id,
+                exc.code,
+                exc.status.name,
+            )
+            context.abort(exc.status, f"{exc.code}: {exc}")
+        except audio_to_text.AlignmentValidationError as exc:
+            LOGGER.warning(
+                "audio_to_text_grpc.request.invalid id=%s code=%s",
+                request_id,
+                exc.code,
+            )
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"{exc.code}: {exc}")
+        except audio_to_text.AlignmentPipelineError as exc:
+            LOGGER.error(
+                "audio_to_text_grpc.request.error id=%s code=%s",
+                request_id,
+                exc.code,
+            )
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"{exc.code}: {exc}")
+        except Exception as exc:
+            LOGGER.exception("audio_to_text_grpc.request.crash id=%s", request_id)
+            context.abort(grpc.StatusCode.INTERNAL, f"{ALIGNMENT_FAILED_CODE}: {exc}")
+        finally:
+            latency = max(0.0, self._clock() - start_time)
+            if metrics_started:
+                self._metrics.record_finish(success, latency)
+            self._inflight_semaphore.release()
+
+    def GetStats(
+        self,
+        request: audio_to_text_grpc_pb2.StatsRequest,
+        context: grpc.ServicerContext,
+    ) -> audio_to_text_grpc_pb2.StatsResponse:
+        """Return a snapshot of metrics."""
+        self._authorize(context)
+        snapshot = self._metrics.snapshot(self._clock)
+        return audio_to_text_grpc_pb2.StatsResponse(
+            requests_total=snapshot.requests_total,
+            requests_succeeded=snapshot.requests_succeeded,
+            requests_failed=snapshot.requests_failed,
+            inflight=snapshot.inflight,
+            bytes_received=snapshot.bytes_received,
+            uptime_seconds=snapshot.uptime_seconds,
+            average_latency_seconds=snapshot.average_latency_seconds,
+            max_latency_seconds=snapshot.max_latency_seconds,
+        )
+
+    def _authorize(self, context: grpc.ServicerContext) -> None:
+        """Authorize the request when a token is configured."""
+        if self._config.auth_token is None:
+            return
+        metadata: dict[str, str] = {}
+        for key, value in context.invocation_metadata():
+            metadata[str(key).lower()] = str(value)
+        auth_header = metadata.get("authorization", "")
+        token_value = ""
+        if auth_header.lower().startswith("bearer "):
+            token_value = auth_header.split(" ", 1)[1].strip()
+        if not token_value:
+            token_value = metadata.get("x-api-key", "")
+        if token_value != self._config.auth_token:
+            raise GrpcRequestError(
+                grpc.StatusCode.UNAUTHENTICATED,
+                AUTH_REQUIRED_CODE,
+                "authorization token is required",
+            )
+
+    def _run_alignment(
+        self, request: AlignRequest, context: grpc.ServicerContext
+    ) -> list[audio_to_text.AlignedWord]:
+        """Run alignment with timeout handling."""
+        if self._config.test_mode:
+            return self._run_with_timeout(
+                lambda: align_in_test_mode(
+                    request.transcript,
+                    self._config.test_delay_seconds,
+                    self._sleep,
+                ),
+                context,
+            )
+        return self._run_with_timeout(lambda: align_in_process(request), context)
+
+    def _run_with_timeout(
+        self,
+        task: Callable[[], list[audio_to_text.AlignedWord]],
+        context: grpc.ServicerContext,
+    ) -> list[audio_to_text.AlignedWord]:
+        """Run an alignment task with timeout handling."""
+        timeout_seconds = self._effective_timeout(context)
+        future = self._alignment_executor.submit(task)
+        try:
+            if timeout_seconds is None:
+                return future.result()
+            return future.result(timeout=timeout_seconds)
+        except futures.TimeoutError as exc:
+            future.cancel()
+            raise GrpcRequestError(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                ALIGNMENT_TIMEOUT_CODE,
+                "alignment timed out",
+            ) from exc
+
+    def _effective_timeout(
+        self, context: grpc.ServicerContext
+    ) -> float | None:
+        """Compute the effective alignment timeout."""
+        remaining = context.time_remaining()
+        if self._config.alignment_timeout_seconds <= 0:
+            return remaining
+        if remaining is None:
+            return self._config.alignment_timeout_seconds
+        return min(self._config.alignment_timeout_seconds, remaining)
 
 
-def serve(host: str, port: int, max_message_bytes: int, max_workers: int) -> None:
+def serve(
+    config: ServerConfig,
+    metrics: MetricsRegistry,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> None:
     """Run the gRPC server."""
+    alignment_executor = futures.ThreadPoolExecutor(max_workers=config.max_inflight)
     server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=max_workers),
+        futures.ThreadPoolExecutor(max_workers=config.max_workers),
         options=[
-            ("grpc.max_receive_message_length", max_message_bytes),
-            ("grpc.max_send_message_length", max_message_bytes),
+            ("grpc.max_receive_message_length", config.max_message_bytes),
+            ("grpc.max_send_message_length", config.max_message_bytes),
         ],
     )
-    audio_to_text_grpc_pb2_grpc.add_AudioToTextServicer_to_server(
-        AudioToTextService(), server
+    service = AudioToTextService(
+        config=config,
+        metrics=metrics,
+        clock=clock,
+        sleep=sleep,
+        alignment_executor=alignment_executor,
     )
-    server.add_insecure_port(f"{host}:{port}")
+    audio_to_text_grpc_pb2_grpc.add_AudioToTextServicer_to_server(service, server)
+    health_service = grpc_health.HealthServicer()
+    health_service.set(
+        "svg_tools.audio_to_text.v1.AudioToText",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+    health_service.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_pb2_grpc.add_HealthServicer_to_server(health_service, server)
+
+    credentials = build_server_credentials(config)
+    address = f"{config.host}:{config.port}"
+    if credentials is None:
+        server.add_insecure_port(address)
+    else:
+        server.add_secure_port(address, credentials)
+
     server.start()
+    LOGGER.info("audio_to_text_grpc.server.started address=%s", address)
     server.wait_for_termination()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for the gRPC server."""
-    args = parse_args(list(argv or ()))
-    serve(
-        host=str(args.host),
-        port=int(args.port),
-        max_message_bytes=int(args.max_message_bytes),
-        max_workers=int(args.max_workers),
-    )
+    env = dict(os.environ)
+    configure_logging(env)
+    try:
+        args = parse_args(list(argv) if argv is not None else sys.argv[1:])
+        config = load_config(args, env)
+    except ValueError as exc:
+        LOGGER.error("audio_to_text_grpc.config.invalid: %s", exc)
+        return 1
+
+    metrics = MetricsRegistry(started_at=time.monotonic())
+    serve(config=config, metrics=metrics, clock=time.monotonic, sleep=time.sleep)
     return 0
 
 

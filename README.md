@@ -305,6 +305,8 @@ docker compose -f docker/audio_to_text/docker-compose.yml run --rm --entrypoint 
 
 gRPC backend for forced alignment: client-stream a WAV + transcript and receive word-level timestamps (and SRT).
 Set `AUDIO_TO_TEXT_GRPC_TEST_MODE=1` to run without invoking whisperx (deterministic fake alignment for integration tests).
+Limits, auth, and TLS are configured via `.env.audio_to_text_grpc` (see the example for defaults).
+Health checks are served via the standard gRPC health service; metrics are returned by `GetStats`.
 
 **Docker (Linux)**
 

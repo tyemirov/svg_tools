@@ -224,6 +224,7 @@ proceed
 - [x] [I125] Allow deleting failed audio_to_text UI jobs. Resolved by widening deletion to finished jobs (completed/failed) and extending integration coverage.
 - [x] [I126] Name audio_to_text SRT downloads after the input audio/video file. Resolved by using the input filename for the stored output path and Content-Disposition header.
 - [x] [I127] Dockerize audio_to_text_grpc and document cache mounts for Hugging Face and Torch. Resolved with dedicated Dockerfiles/compose, a shared env example, and README updates.
+- [x] [I128] Productionize audio_to_text_grpc with in-process alignment, health/status endpoints, limits, auth, and timeout enforcement. Resolved with in-process whisperx alignment, standard gRPC health, stats RPC, limits/auth/timeout enforcement, and expanded integration tests.
 
 ## Maintenance Addendum (400–499)
 

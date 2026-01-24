@@ -39,12 +39,23 @@ class AudioToTextStub(object):
                 request_serializer=audio__to__text__grpc__pb2.AlignChunk.SerializeToString,
                 response_deserializer=audio__to__text__grpc__pb2.AlignResponse.FromString,
                 _registered_method=True)
+        self.GetStats = channel.unary_unary(
+                '/svg_tools.audio_to_text.v1.AudioToText/GetStats',
+                request_serializer=audio__to__text__grpc__pb2.StatsRequest.SerializeToString,
+                response_deserializer=audio__to__text__grpc__pb2.StatsResponse.FromString,
+                _registered_method=True)
 
 
 class AudioToTextServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Align(self, request_iterator, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetStats(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -57,6 +68,11 @@ def add_AudioToTextServicer_to_server(servicer, server):
                     servicer.Align,
                     request_deserializer=audio__to__text__grpc__pb2.AlignChunk.FromString,
                     response_serializer=audio__to__text__grpc__pb2.AlignResponse.SerializeToString,
+            ),
+            'GetStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStats,
+                    request_deserializer=audio__to__text__grpc__pb2.StatsRequest.FromString,
+                    response_serializer=audio__to__text__grpc__pb2.StatsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -86,6 +102,33 @@ class AudioToText(object):
             '/svg_tools.audio_to_text.v1.AudioToText/Align',
             audio__to__text__grpc__pb2.AlignChunk.SerializeToString,
             audio__to__text__grpc__pb2.AlignResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/svg_tools.audio_to_text.v1.AudioToText/GetStats',
+            audio__to__text__grpc__pb2.StatsRequest.SerializeToString,
+            audio__to__text__grpc__pb2.StatsResponse.FromString,
             options,
             channel_credentials,
             insecure,

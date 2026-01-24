@@ -37,7 +37,20 @@ message AlignResponse {
   string audio_filename = 3;
 }
 
-service AudioToText {
-  rpc Align(stream AlignChunk) returns (AlignResponse);
+message StatsRequest {}
+
+message StatsResponse {
+  uint64 requests_total = 1;
+  uint64 requests_succeeded = 2;
+  uint64 requests_failed = 3;
+  uint64 inflight = 4;
+  uint64 bytes_received = 5;
+  double uptime_seconds = 6;
+  double average_latency_seconds = 7;
+  double max_latency_seconds = 8;
 }
 
+service AudioToText {
+  rpc Align(stream AlignChunk) returns (AlignResponse);
+  rpc GetStats(StatsRequest) returns (StatsResponse);
+}
