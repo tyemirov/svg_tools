@@ -96,12 +96,9 @@ def build_render_plan(
     token_offset = 0
 
     for window in windows:
-        window_start_frame = int(round(window.start_seconds * fps))
-        window_end_frame = int(round(window.end_seconds * fps))
-        if window_end_frame <= window_start_frame:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window has no frames"
-            )
+        window_start_frame, window_end_frame = window_to_frames(
+            window.start_seconds, window.end_seconds, fps
+        )
         if window_start_frame < current_end_frame:
             raise RenderValidationError(
                 INVALID_WINDOW_CODE, "subtitle windows overlap"
@@ -142,6 +139,17 @@ def build_render_plan(
         words=tuple(words),
         scheduled_words=tuple(scheduled_words),
     )
+
+
+def window_to_frames(
+    start_seconds: float, end_seconds: float, fps: int
+) -> Tuple[int, int]:
+    """Convert subtitle window seconds to a non-empty frame range."""
+    start_frame = int(round(start_seconds * fps))
+    end_frame = int(round(end_seconds * fps))
+    if end_frame <= start_frame:
+        end_frame = start_frame + 1
+    return start_frame, end_frame
 
 
 def ms_to_frames_ceil(milliseconds: float, fps: int) -> int:
@@ -220,6 +228,31 @@ def allocate_weighted_frames(
     return tuple(allocations)
 
 
+def compute_rsvp_start_frame(
+    window_start_frame: int,
+    window_frames: int,
+    sequence_frames: int,
+    current_end_frame: int,
+    total_frames: int,
+) -> int:
+    """Compute a best-effort start frame for RSVP scheduling."""
+    if sequence_frames > total_frames:
+        raise RenderValidationError(
+            INVALID_WINDOW_CODE, "subtitle window exceeds duration"
+        )
+
+    start_frame = window_start_frame
+    if sequence_frames > window_frames:
+        overflow = sequence_frames - window_frames
+        start_frame = max(0, window_start_frame - overflow // 2)
+
+    start_frame = max(start_frame, current_end_frame)
+    if start_frame + sequence_frames > total_frames:
+        start_frame = max(current_end_frame, total_frames - sequence_frames)
+
+    return start_frame
+
+
 def build_rsvp_render_plan(
     windows: Sequence[SubtitleWindow], fps: int, duration_seconds: float
 ) -> RenderPlan:
@@ -244,16 +277,9 @@ def build_rsvp_render_plan(
     token_offset = 0
 
     for window in windows:
-        window_start_frame = int(round(window.start_seconds * fps))
-        window_end_frame = int(round(window.end_seconds * fps))
-        if window_end_frame <= window_start_frame:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window has no frames"
-            )
-        if window_start_frame < current_end_frame:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle windows overlap"
-            )
+        window_start_frame, window_end_frame = window_to_frames(
+            window.start_seconds, window.end_seconds, fps
+        )
         if window_end_frame > total_frames:
             raise RenderValidationError(
                 INVALID_WINDOW_CODE, "subtitle window exceeds duration"
@@ -273,30 +299,48 @@ def build_rsvp_render_plan(
             punctuation_flags.append(bool(trailing))
             weights.append(max(1, len(core)))
 
-        pause_total = pause_frames * sum(1 for flag in punctuation_flags if flag)
+        pause_frames_used = pause_frames
+        pause_total = pause_frames_used * sum(1 for flag in punctuation_flags if flag)
         available_frames = window_frames - pause_total
         if available_frames <= 0:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window too short for RSVP pauses"
-            )
+            pause_frames_used = 0
+            pause_total = 0
+            available_frames = window_frames
 
         min_total = min_frames * word_count
         max_total = max_frames * word_count
-        if available_frames < min_total:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window too short for RSVP timing"
-            )
         target_frames = min(available_frames, max_total)
+        min_frames_override = min_frames
+        if available_frames < min_total:
+            pause_frames_used = 0
+            pause_total = 0
+            available_frames = window_frames
+            min_frames_override = max(1, available_frames // word_count)
+            min_total_override = min_frames_override * word_count
+            if available_frames < min_total_override:
+                target_frames = min_total_override
+            else:
+                target_frames = available_frames
 
+        max_frames_override = max(
+            min_frames_override, min(max_frames, target_frames)
+        )
         base_frames = allocate_weighted_frames(
-            weights, target_frames, min_frames, max_frames
+            weights, target_frames, min_frames_override, max_frames_override
         )
         per_word_frames = [
-            base + (pause_frames if flagged else 0)
+            base + (pause_frames_used if flagged else 0)
             for base, flagged in zip(base_frames, punctuation_flags)
         ]
 
-        cursor_frame = window_start_frame
+        sequence_frames = sum(per_word_frames)
+        cursor_frame = compute_rsvp_start_frame(
+            window_start_frame,
+            window_frames,
+            sequence_frames,
+            current_end_frame,
+            total_frames,
+        )
         for index, word in enumerate(window.words):
             frame_count = per_word_frames[index]
             scheduled_words.append(
@@ -309,13 +353,8 @@ def build_rsvp_render_plan(
             cursor_frame += frame_count
             words.append(word)
 
-        if cursor_frame > window_end_frame:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window timing overflow"
-            )
-
         token_offset += word_count
-        current_end_frame = window_end_frame
+        current_end_frame = cursor_frame
 
     return RenderPlan(
         total_frames=total_frames,

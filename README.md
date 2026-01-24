@@ -234,7 +234,7 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * RSVP punctuation pauses only apply when punctuation is preserved.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT/SBV input (single word at a time with ORP anchoring).
-* RSVP mode requires subtitle timing and does not use motion directions or per-word random sizing.
+* RSVP mode requires subtitle timing and does not use motion directions or per-word random sizing; when a cue is too short, per-word timing is compressed and cues may drift slightly to fit.
 * `--font-min`/`--font-max` constrain the randomized font size range for `criss_cross`; if only one bound is provided, the other bound is clamped to it.
 * `--background` applies only when no background image is used.
 * ProRes output uses adaptive quantization plus 8-bit alpha to reduce file sizes on large frames.
@@ -247,6 +247,57 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * Letters render in per-letter bands aligned with the motion axis; band offsets are centered and spaced by glyph sizes with tracking, reversed for L2R/T2B so the first letter leads the motion, and vertical directions also add staggered offsets.
 * `--emit-directions` prints JSON with `directions`, `font_sizes`, `words`, `letter_offsets`, `letter_bands`, and `letter_band_sizes` (band offsets centered on the motion axis), then exits without rendering.
 * Output is always a `.mov` file; default name is `video.mov`.
+
+---
+
+### `audio_to_text.py`
+
+Force-align audio or video to a provided transcript and emit an SRT with word-level timing.
+
+**CLI usage:**
+
+```shell
+./audio_to_text.py \
+    --input-audio <PATH> \
+    --input-text <PATH> \
+    [--output-srt <PATH.srt>] \
+    [--language <CODE>]
+```
+
+**UI usage:**
+
+```shell
+./audio_to_text.py --ui [--ui-host <HOST>] [--ui-port <PORT>]
+```
+
+The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
+audio_to_text is supported on Linux only; on macOS or Windows, run it via Docker.
+Uploads are stored under `data/audio_to_text_uploads` and persisted via the `data/` bind mount in the Docker compose files.
+Model downloads are cached under `data/hf-cache` on the host.
+Torch/torchaudio checkpoints (e.g. wav2vec2 ASR weights) are cached under `data/torch-cache` on the host.
+
+**Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
+**Runtime requirements:** torch >= 2.6 and torchaudio >= 2.6 (pinned for Linux) for AudioMetaData support and Hugging Face `.bin` models.
+
+**Docker (Linux)**
+
+Create the shared env file:
+
+```shell
+cp .env.audio_to_text.example .env.audio_to_text
+```
+
+Development (bind-mounts the repo for local changes):
+
+```shell
+docker compose -f docker/audio_to_text/docker-compose.yml up --build
+```
+
+Tests (Linux container):
+
+```shell
+docker compose -f docker/audio_to_text/docker-compose.yml run --rm --entrypoint make audio_to_text test
+```
 
 ---
 
