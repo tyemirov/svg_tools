@@ -15,6 +15,8 @@ using inline PEP 723 metadata.
 - `*.py`: top-level script entrypoints.
 - `assets/`: example assets used in README examples.
 - `data/inputs/`: sample input files for CLI runs.
+- `audio_to_text_backend/`: HTTP backend service package for alignment jobs.
+- `audio_to_text_ui/`: standalone browser UI assets for alignment.
 - `uv.lock`: pinned dependency resolution for `uv`.
 
 ## Script roles
@@ -26,6 +28,12 @@ using inline PEP 723 metadata.
 - `text_to_svg.py`: converts text into a single-path SVG using a font file.
 - `to_favicons.py`: generates a favicon package and HTML head snippet from a source SVG.
 - `audio_to_text_grpc.py`: gRPC backend for forced-aligning a transcript to a streamed WAV and returning word-level timings (and SRT).
+- `audio_to_text_backend.py`: HTTP backend orchestrator for alignment jobs, calling the gRPC aligner and persisting job state.
+
+## Services
+- `audio_to_text_ui/`: standalone browser UI that uploads audio/text and listens for REST/SSE job updates.
+- `audio_to_text_backend.py`: HTTP REST/SSE service that extracts audio, calls the gRPC aligner, and stores job artifacts.
+- `audio_to_text_grpc.py`: gRPC aligner service that accepts a streamed WAV + transcript and returns word timings.
 
 ## External dependencies
 - Python 3.11+ and `uv` on PATH.

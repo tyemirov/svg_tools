@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Audio to Text Alignment</title>
+    <link rel="stylesheet" href="assets/css/styles.css">
+  </head>
+  <body>
+    <div class="ambient"></div>
+    <main class="shell" x-data="AudioAlignmentApp()" x-init="init()">
+      <section class="hero">
+        <div class="badge" x-text="strings.badge"></div>
+        <h1 x-text="strings.title"></h1>
+        <p x-text="strings.description"></p>
+      </section>
+      <section class="panel">
+        <div class="drop-grid">
+          <label
+            class="dropzone"
+            :class="{'is-dragging': audioDragging, 'is-filled': audioFilled}"
+            @dragover.prevent="setDragState('audio', true)"
+            @dragleave="setDragState('audio', false)"
+            @drop.prevent="handleDrop('audio', $event)"
+          >
+            <input
+              type="file"
+              :accept="audioAccept"
+              @change="handleAudioChange($event)"
+            >
+            <div class="drop-title" x-text="strings.audioTitle"></div>
+            <div class="drop-meta" x-text="audioMeta"></div>
+          </label>
+          <label
+            class="dropzone"
+            :class="{'is-dragging': textDragging, 'is-filled': textFilled}"
+            @dragover.prevent="setDragState('text', true)"
+            @dragleave="setDragState('text', false)"
+            @drop.prevent="handleDrop('text', $event)"
+          >
+            <input
+              type="file"
+              :accept="textAccept"
+              @change="handleTextChange($event)"
+            >
+            <div class="drop-title" x-text="strings.textTitle"></div>
+            <div class="drop-meta" x-text="textMeta"></div>
+          </label>
+        </div>
+        <div class="options">
+          <label class="option">
+            <span x-text="strings.languageLabel"></span>
+            <select x-model="language" @change="handleLanguageChange()">
+              <template x-for="option in languageOptions" :key="option.value">
+                <option :value="option.value" x-text="option.label"></option>
+              </template>
+            </select>
+          </label>
+          <label class="option">
+            <span x-text="strings.punctuationLabel"></span>
+            <div class="toggle">
+              <input type="checkbox" x-model="removePunctuation">
+              <span x-text="strings.punctuationEnabled"></span>
+            </div>
+          </label>
+        </div>
+        <div class="actions">
+          <button class="run-button" type="button" :disabled="!canRun" @click="startJob()">
+            <span x-text="strings.runButton"></span>
+          </button>
+        </div>
+        <div class="status">
+          <div class="status-main" x-text="statusLine"></div>
+          <div class="status-sub" x-text="statusSub"></div>
+        </div>
+        <div class="jobs">
+          <div class="jobs-header">
+            <span x-text="strings.jobsHeader"></span>
+            <span class="jobs-count" x-text="jobCount"></span>
+          </div>
+          <div class="job-list">
+            <template x-for="job in sortedJobs()" :key="job.job_id">
+              <article class="job-card">
+                <header class="job-header">
+                  <div class="job-title" x-text="jobTitle(job)"></div>
+                  <div class="job-status" :class="statusClass(job)" x-text="statusLabel(job)"></div>
+                </header>
+                <div class="job-meta" x-text="jobMeta(job)"></div>
+                <div class="job-message" x-text="jobMessage(job)"></div>
+                <div class="job-progress">
+                  <div class="job-progress-bar" :style="jobProgressStyle(job)"></div>
+                </div>
+                <div class="job-actions">
+                  <a
+                    class="job-download"
+                    :class="{'hidden': !jobDownloadReady(job)}"
+                    :href="downloadUrl(job)"
+                    x-text="strings.downloadLabel"
+                  ></a>
+                  <button
+                    class="job-delete"
+                    type="button"
+                    x-show="jobDeletable(job)"
+                    @click="deleteJob(job)"
+                    :title="strings.deleteJobTitle"
+                    :aria-label="strings.deleteJobTitle"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M3 6h18"></path>
+                      <path d="M8 6V4h8v2"></path>
+                      <path d="M6 6l1 16h10l1-16"></path>
+                      <path d="M10 11v6"></path>
+                      <path d="M14 11v6"></path>
+                    </svg>
+                  </button>
+                </div>
+              </article>
+            </template>
+          </div>
+        </div>
+        <div class="error" :class="{'hidden': !errorMessage}" x-text="errorMessage"></div>
+      </section>
+    </main>
+    <script src="config.js"></script>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

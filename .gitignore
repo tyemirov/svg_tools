@@ -20,6 +20,8 @@ coverage*.html
 .env.*
 !.env.audio_to_text.example
 !.env.audio_to_text_grpc.example
+!.env.audio_to_text_backend.example
+!.env.audio_to_text_ui.example
 .DS_Store
 qodana.yaml
 .idea/

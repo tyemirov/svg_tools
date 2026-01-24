@@ -249,3 +249,7 @@ proceed
 - [x] [B332] Fix audio_to_text alignment failures when whisperx emits non-punctuation tokens without timestamps (e.g. single letters or full words). Resolved by inferring token timings from segment bounds, keeping punctuation-merging behavior, and extending integration coverage via `--input-alignment-json`.
 - [ ] [B333] Harden audio_to_text alignment extraction when segments or tokens lack valid timestamps by adding fallback bounds and merging unaligned tokens instead of failing.
 - [x] [B333] Harden audio_to_text alignment extraction when segments or tokens lack valid timestamps by adding fallback bounds, coercing invalid timestamps, and extending integration coverage for missing/non-finite cases.
+- [ ] [I129] Split audio_to_text into a standalone UI, an HTTP backend orchestrator (REST + SSE + ffmpeg extraction), and the gRPC aligner, with a 3-service Docker Compose stack.
+- [ ] [I130] Make backend alignment jobs asynchronous/decoupled from gRPC calls to allow queueing and retries.
+- Tooling baseline (I129): `make test` fails because `audio_to_text_backend` server entrypoint is not implemented yet (backend tests time out).
+- [x] [I129] Split audio_to_text into a standalone UI, HTTP backend orchestrator, and gRPC aligner with a 3-service Docker Compose stack. Resolved with the new backend package, standalone UI assets, stack compose/env updates, and integration coverage for backend job flow/SSE.
