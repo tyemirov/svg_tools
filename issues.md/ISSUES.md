@@ -253,3 +253,5 @@ proceed
 - [ ] [I130] Make backend alignment jobs asynchronous/decoupled from gRPC calls to allow queueing and retries.
 - Tooling baseline (I129): `make test` fails because `audio_to_text_backend` server entrypoint is not implemented yet (backend tests time out).
 - [x] [I129] Split audio_to_text into a standalone UI, HTTP backend orchestrator, and gRPC aligner with a 3-service Docker Compose stack. Resolved with the new backend package, standalone UI assets, stack compose/env updates, and integration coverage for backend job flow/SSE.
+- [ ] [I131] Inject a test alignment runner into audio_to_text_grpc so the gRPC service always uses a single alignment pipeline with an injected runner.
+- [x] [I131] Inject a test alignment runner into audio_to_text_grpc so the gRPC service always uses a single alignment pipeline with an injected runner. Resolved with alignment runner injection and startup selection for test mode.

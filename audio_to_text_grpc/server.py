@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import logging
 import os
 import tempfile
@@ -72,6 +73,9 @@ class AlignRequest:
     remove_punctuation: bool
     audio_filename: str
     audio_bytes: int
+
+
+AlignmentRunner = Callable[[AlignRequest], list[audio_to_text.AlignedWord]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -507,7 +511,9 @@ def collect_request(
 
 
 def align_in_test_mode(
-    transcript: str, delay_seconds: float, sleep: Callable[[float], None]
+    request: AlignRequest,
+    delay_seconds: float,
+    sleep: Callable[[float], None],
 ) -> list[audio_to_text.AlignedWord]:
     """Return deterministic fake alignment for integration tests."""
     if delay_seconds > 0:
@@ -515,7 +521,7 @@ def align_in_test_mode(
     aligned: list[audio_to_text.AlignedWord] = []
     cursor = 0.0
     step = 0.25
-    for token in transcript.split():
+    for token in request.transcript.split():
         aligned.append(
             audio_to_text.AlignedWord(
                 text=token,
@@ -539,6 +545,20 @@ def align_in_process(request: AlignRequest) -> list[audio_to_text.AlignedWord]:
     )
 
 
+def build_alignment_runner(
+    config: ServerConfig,
+    sleep: Callable[[float], None],
+) -> AlignmentRunner:
+    """Build an alignment runner for the server."""
+    if config.test_mode:
+        return functools.partial(
+            align_in_test_mode,
+            delay_seconds=config.test_delay_seconds,
+            sleep=sleep,
+        )
+    return align_in_process
+
+
 class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
     """gRPC service implementation."""
 
@@ -547,13 +567,13 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         config: ServerConfig,
         metrics: MetricsRegistry,
         clock: Callable[[], float],
-        sleep: Callable[[float], None],
+        alignment_runner: AlignmentRunner,
         alignment_executor: futures.Executor,
     ) -> None:
         self._config = config
         self._metrics = metrics
         self._clock = clock
-        self._sleep = sleep
+        self._alignment_runner = alignment_runner
         self._alignment_executor = alignment_executor
         self._inflight_semaphore = threading.BoundedSemaphore(config.max_inflight)
 
@@ -681,16 +701,10 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         self, request: AlignRequest, context: grpc.ServicerContext
     ) -> list[audio_to_text.AlignedWord]:
         """Run alignment with timeout handling."""
-        if self._config.test_mode:
-            return self._run_with_timeout(
-                lambda: align_in_test_mode(
-                    request.transcript,
-                    self._config.test_delay_seconds,
-                    self._sleep,
-                ),
-                context,
-            )
-        return self._run_with_timeout(lambda: align_in_process(request), context)
+        return self._run_with_timeout(
+            lambda: self._alignment_runner(request),
+            context,
+        )
 
     def _run_with_timeout(
         self,
@@ -728,7 +742,7 @@ def serve(
     config: ServerConfig,
     metrics: MetricsRegistry,
     clock: Callable[[], float],
-    sleep: Callable[[float], None],
+    alignment_runner: AlignmentRunner,
 ) -> None:
     """Run the gRPC server."""
     alignment_executor = futures.ThreadPoolExecutor(max_workers=config.max_inflight)
@@ -743,7 +757,7 @@ def serve(
         config=config,
         metrics=metrics,
         clock=clock,
-        sleep=sleep,
+        alignment_runner=alignment_runner,
         alignment_executor=alignment_executor,
     )
     audio_to_text_grpc_pb2_grpc.add_AudioToTextServicer_to_server(service, server)
@@ -779,7 +793,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     metrics = MetricsRegistry(started_at=time.monotonic())
-    serve(config=config, metrics=metrics, clock=time.monotonic, sleep=time.sleep)
+    alignment_runner = build_alignment_runner(config=config, sleep=time.sleep)
+    serve(
+        config=config,
+        metrics=metrics,
+        clock=time.monotonic,
+        alignment_runner=alignment_runner,
+    )
     return 0
 
 
