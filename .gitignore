@@ -2,6 +2,7 @@
 .DS_Store
 assets/
 data/inputs
+data/hf-cache/
 /OpenSans-*.ttf
 
 PLAN.md
@@ -17,6 +18,7 @@ coverage*.html
 # Managed by gix gitignore workflow
 .env
 .env.*
+!.env.audio_to_text.example
 .DS_Store
 qodana.yaml
 .idea/
