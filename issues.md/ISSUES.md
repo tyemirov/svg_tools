@@ -54,6 +54,8 @@ No timing overlaps
 ORP X position stable within ±2 px across words
 Burned-in subtitles; reuse existing overlay pipeline
 
+- [x] [F101] Provide a WAV-only forced-alignment gRPC backend service with client-streaming uploads and a test-only mode. Returns word-level timestamps (and SRT) for a transcript forced-aligned to a streamed WAV; punctuation stripping defaults to enabled, language defaults via transcript heuristic. Resolved with a new gRPC server entrypoint, proto/stubs, and integration tests exercising test mode and input validation.
+
 ## Improvements (200–299)
 
 - [x] [I100] Allow [text](../render_text_video.py) file to parse srt files with subtitles and timing, and distribute the words only through the timwindow allowed in subtitles. See example in [text](../data/inputs/captions.srt). Resolved with SRT parsing, timing-aware scheduling, and integration tests.
