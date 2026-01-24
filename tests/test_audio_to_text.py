@@ -6,6 +6,7 @@ import platform
 import subprocess
 import wave
 import json
+import math
 import socket
 import time
 import urllib.error
@@ -221,6 +222,89 @@ def test_audio_to_text_alignment_json_infers_missing_timestamps_for_words(
                         "words": [
                             {"word": "A", "start": 0.0, "end": 0.2},
                             {"word": "B", "start": None, "end": None},
+                            {"word": "C", "start": 0.8, "end": 1.0},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_srt = tmp_path / "output.srt"
+    args = [
+        str(script_path),
+        "--input-alignment-json",
+        str(alignment_json),
+        "--output-srt",
+        str(output_srt),
+    ]
+
+    result = run_audio_to_text(args, repo_root)
+
+    assert result.returncode == 0
+    content = output_srt.read_text(encoding="utf-8")
+    assert "\nB\n" in content
+
+
+def test_audio_to_text_alignment_json_infers_missing_timestamps_without_segment_bounds(
+    tmp_path: Path,
+) -> None:
+    """Infer timestamps when segment bounds are missing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "audio_to_text.py"
+
+    alignment_json = tmp_path / "alignment.json"
+    alignment_json.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "words": [
+                            {"word": "One", "start": None, "end": None},
+                            {"word": "Two", "start": None, "end": None},
+                        ]
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_srt = tmp_path / "output.srt"
+    args = [
+        str(script_path),
+        "--input-alignment-json",
+        str(alignment_json),
+        "--output-srt",
+        str(output_srt),
+    ]
+
+    result = run_audio_to_text(args, repo_root)
+
+    assert result.returncode == 0
+    content = output_srt.read_text(encoding="utf-8")
+    assert content.index("One") < content.index("Two")
+
+
+def test_audio_to_text_alignment_json_recovers_nonfinite_timestamps(
+    tmp_path: Path,
+) -> None:
+    """Recover when alignment JSON includes non-finite timestamps."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "audio_to_text.py"
+
+    alignment_json = tmp_path / "alignment.json"
+    alignment_json.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "words": [
+                            {"word": "A", "start": 0.0, "end": 0.2},
+                            {"word": "B", "start": math.nan, "end": math.nan},
                             {"word": "C", "start": 0.8, "end": 1.0},
                         ],
                     }

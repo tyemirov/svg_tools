@@ -19,6 +19,7 @@ import importlib
 import json
 import logging
 import math
+import numbers
 import os
 import platform
 import re
@@ -130,6 +131,7 @@ ALIGNMENT_TIME_SCALE = {
     "cuda": 0.75,
 }
 DEFAULT_ALIGNMENT_TIME_SCALE = 1.0
+DEFAULT_MISSING_TOKEN_SECONDS = 0.25
 SSE_KEEPALIVE_SECONDS = 5.0
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}$"
@@ -1483,42 +1485,72 @@ def strip_punctuation_from_token(text_value: str) -> str:
     return "".join(kept).strip()
 
 
-def merge_punctuation_suffix(
+def merge_token_suffix(
     words: list[AlignedWord],
-    punctuation: str,
+    token_text: str,
 ) -> None:
-    """Merge punctuation into the previous word."""
+    """Merge token text into the previous word."""
     if not words:
         raise AlignmentPipelineError(
             ALIGNMENT_TIMESTAMP_CODE,
-            f"cannot merge punctuation without a previous word: {punctuation}",
+            f"cannot merge token without a previous word: {token_text}",
         )
     previous = words[-1]
     merged = AlignedWord(
-        text=f"{previous.text} {punctuation}",
+        text=f"{previous.text} {token_text}",
         start_seconds=previous.start_seconds,
         end_seconds=previous.end_seconds,
     )
     words[-1] = merged
 
 
-def merge_punctuation_suffix_token(
+def merge_token_suffix_token(
     tokens: list[dict[str, object]],
     words: list[AlignedWord],
-    punctuation: str,
+    token_text: str,
 ) -> None:
-    """Merge punctuation into the most recent token."""
+    """Merge token text into the most recent token."""
     if tokens:
         previous_text = str(tokens[-1].get("text", "")).strip()
-        tokens[-1]["text"] = f"{previous_text} {punctuation}".strip()
+        tokens[-1]["text"] = f"{previous_text} {token_text}".strip()
         return
     if words:
-        merge_punctuation_suffix(words, punctuation)
+        merge_token_suffix(words, token_text)
         return
     raise AlignmentPipelineError(
         ALIGNMENT_TIMESTAMP_CODE,
-        f"cannot merge punctuation without a previous word: {punctuation}",
+        f"cannot merge token without a previous word: {token_text}",
     )
+
+
+def coerce_timestamp(value: object) -> float | None:
+    """Coerce a numeric timestamp into a finite float."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, numbers.Real):
+        candidate = float(value)
+        if math.isfinite(candidate):
+            return candidate
+    return None
+
+
+def default_segment_bounds(
+    token_count: int,
+    last_known_end: float | None,
+) -> tuple[float, float]:
+    """Build fallback segment bounds when timestamps are missing."""
+    if token_count <= 0:
+        raise AlignmentPipelineError(
+            ALIGNMENT_TIMESTAMP_CODE,
+            "segment contains no tokens for fallback bounds",
+        )
+    start_seconds = last_known_end if last_known_end is not None else 0.0
+    if start_seconds < 0:
+        start_seconds = 0.0
+    window_seconds = DEFAULT_MISSING_TOKEN_SECONDS * float(token_count)
+    if window_seconds <= 0:
+        window_seconds = DEFAULT_MISSING_TOKEN_SECONDS
+    return start_seconds, start_seconds + window_seconds
 
 
 def segment_bounds(
@@ -1526,11 +1558,9 @@ def segment_bounds(
     fallback: tuple[float, float] | None,
 ) -> tuple[float, float]:
     """Resolve segment start and end bounds."""
-    start = segment.get("start")
-    end = segment.get("end")
-    if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-        start_seconds = float(start)
-        end_seconds = float(end)
+    start_seconds = coerce_timestamp(segment.get("start"))
+    end_seconds = coerce_timestamp(segment.get("end"))
+    if start_seconds is not None and end_seconds is not None:
         if end_seconds > start_seconds:
             return start_seconds, end_seconds
     if fallback is None:
@@ -1548,11 +1578,9 @@ def segment_bounds_from_tokens(
     starts: list[float] = []
     ends: list[float] = []
     for token in tokens:
-        start = token.get("start")
-        end = token.get("end")
-        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-            start_value = float(start)
-            end_value = float(end)
+        start_value = coerce_timestamp(token.get("start"))
+        end_value = coerce_timestamp(token.get("end"))
+        if start_value is not None and end_value is not None:
             if end_value > start_value:
                 starts.append(start_value)
                 ends.append(end_value)
@@ -1575,12 +1603,13 @@ def infer_missing_timings(
     """Fill missing token timestamps in place."""
     missing_texts: list[str] = []
     for token in tokens:
-        start = token.get("start")
-        end = token.get("end")
-        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-            token["start"] = float(start)
-            token["end"] = float(end)
-            continue
+        start_value = coerce_timestamp(token.get("start"))
+        end_value = coerce_timestamp(token.get("end"))
+        if start_value is not None and end_value is not None:
+            if end_value > start_value:
+                token["start"] = start_value
+                token["end"] = end_value
+                continue
         token["start"] = None
         token["end"] = None
         missing_texts.append(str(token.get("text", "")).strip())
@@ -1647,6 +1676,7 @@ def extract_aligned_words(
     """Extract aligned words from alignment output."""
     words: list[AlignedWord] = []
     pending_prefix_tokens: list[str] = []
+    last_known_end: float | None = None
     for segment in segments:
         if not isinstance(segment, dict):
             raise AlignmentPipelineError(
@@ -1679,13 +1709,17 @@ def extract_aligned_words(
                         ALIGNMENT_TIMESTAMP_CODE,
                         "aligned word text is empty after punctuation removal",
                     )
-            start = word.get("start")
-            end = word.get("end")
+            start_value = coerce_timestamp(word.get("start"))
+            end_value = coerce_timestamp(word.get("end"))
+            if start_value is not None and end_value is not None:
+                if end_value <= start_value:
+                    start_value = None
+                    end_value = None
             if text_value == "":
                 raise AlignmentPipelineError(
                     ALIGNMENT_TIMESTAMP_CODE, "aligned word text is empty"
                 )
-            if start is None or end is None:
+            if start_value is None or end_value is None:
                 if remove_punctuation and is_punctuation_token(text_value):
                     LOGGER.warning(
                         "%s: dropping punctuation with missing timestamps: %s",
@@ -1700,14 +1734,14 @@ def extract_aligned_words(
                             ALIGNMENT_TIMESTAMP_CODE,
                             text_value,
                         )
-                        merge_punctuation_suffix_token(tokens, words, text_value)
+                        merge_token_suffix_token(tokens, words, text_value)
                     elif words:
                         LOGGER.warning(
                             "%s: merging punctuation with missing timestamps: %s",
                             ALIGNMENT_TIMESTAMP_CODE,
                             text_value,
                         )
-                        merge_punctuation_suffix_token(tokens, words, text_value)
+                        merge_token_suffix_token(tokens, words, text_value)
                     else:
                         LOGGER.warning(
                             "%s: carrying punctuation with missing timestamps: %s",
@@ -1727,29 +1761,67 @@ def extract_aligned_words(
             if pending_prefix_tokens:
                 text_value = " ".join([*pending_prefix_tokens, text_value])
                 pending_prefix_tokens.clear()
-            tokens.append({"text": text_value, "start": start, "end": end})
+            tokens.append(
+                {"text": text_value, "start": start_value, "end": end_value}
+            )
 
         if not tokens:
             continue
 
         fallback = segment_bounds_from_tokens(tokens)
+        if fallback is None:
+            LOGGER.warning(
+                "%s: inferring segment bounds for %d token(s)",
+                ALIGNMENT_INFERRED_TIMESTAMPS_CODE,
+                len(tokens),
+            )
+            fallback = default_segment_bounds(len(tokens), last_known_end)
         segment_start, segment_end = segment_bounds(segment, fallback)
         infer_missing_timings(tokens, segment_start, segment_end)
+        segment_has_words = False
         for token in tokens:
-            start_value = token.get("start")
-            end_value = token.get("end")
-            if not isinstance(start_value, float) or not isinstance(end_value, float):
-                raise AlignmentPipelineError(
-                    ALIGNMENT_TIMESTAMP_CODE,
-                    f"aligned word is missing timestamps: {token.get('text', '')}",
-                )
+            token_text = str(token.get("text", "")).strip()
+            start_value = coerce_timestamp(token.get("start"))
+            end_value = coerce_timestamp(token.get("end"))
+            if (
+                start_value is None
+                or end_value is None
+                or end_value <= start_value
+            ):
+                if remove_punctuation and is_punctuation_token(token_text):
+                    LOGGER.warning(
+                        "%s: dropping punctuation with missing timestamps: %s",
+                        ALIGNMENT_TIMESTAMP_CODE,
+                        token_text,
+                    )
+                    continue
+                if segment_has_words:
+                    LOGGER.warning(
+                        "%s: merging token with missing timestamps: %s",
+                        ALIGNMENT_TIMESTAMP_CODE,
+                        token_text,
+                    )
+                    merge_token_suffix(words, token_text)
+                else:
+                    LOGGER.warning(
+                        "%s: carrying token with missing timestamps: %s",
+                        ALIGNMENT_TIMESTAMP_CODE,
+                        token_text,
+                    )
+                    pending_prefix_tokens.append(token_text)
+                continue
+            if pending_prefix_tokens:
+                token_text = " ".join([*pending_prefix_tokens, token_text]).strip()
+                pending_prefix_tokens.clear()
             words.append(
                 AlignedWord(
-                    text=str(token.get("text", "")).strip(),
+                    text=token_text,
                     start_seconds=start_value,
                     end_seconds=end_value,
                 )
             )
+            last_known_end = end_value
+            segment_has_words = True
 
     if not words:
         raise AlignmentPipelineError(

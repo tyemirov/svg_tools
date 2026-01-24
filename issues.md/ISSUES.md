@@ -247,3 +247,5 @@ proceed
 
 - [x] [B331] Fix audio_to_text alignment failures when whisperx emits punctuation tokens (e.g., em dash) without timestamps. Resolved by merging punctuation into neighboring word cues, capturing Python warnings via logging, and adding integration coverage via `--input-alignment-json`.
 - [x] [B332] Fix audio_to_text alignment failures when whisperx emits non-punctuation tokens without timestamps (e.g. single letters or full words). Resolved by inferring token timings from segment bounds, keeping punctuation-merging behavior, and extending integration coverage via `--input-alignment-json`.
+- [ ] [B333] Harden audio_to_text alignment extraction when segments or tokens lack valid timestamps by adding fallback bounds and merging unaligned tokens instead of failing.
+- [x] [B333] Harden audio_to_text alignment extraction when segments or tokens lack valid timestamps by adding fallback bounds, coercing invalid timestamps, and extending integration coverage for missing/non-finite cases.
