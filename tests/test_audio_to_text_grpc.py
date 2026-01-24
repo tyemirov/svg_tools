@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import wave
+import signal
 from io import BytesIO
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -153,12 +154,16 @@ def start_server(
 
 def stop_process(process: subprocess.Popen[str]) -> None:
     """Terminate a subprocess and wait."""
-    process.terminate()
+    process.send_signal(signal.SIGINT)
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=3)
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
 
 
 def read_error_status(error: grpc.RpcError) -> tuple[grpc.StatusCode, str]:
@@ -498,4 +503,3 @@ def test_audio_to_text_grpc_tls(tmp_path: Path) -> None:
         assert response.words
     finally:
         stop_process(process)
-

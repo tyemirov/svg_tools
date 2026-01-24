@@ -11,6 +11,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+import sys
 from pathlib import Path
 from typing import List
 
@@ -26,7 +27,7 @@ if platform.system().lower() != "linux":
 def run_audio_to_text(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
     """Run audio_to_text.py with the provided arguments."""
     return subprocess.run(
-        args,
+        [sys.executable, *args],
         cwd=repo_root,
         text=True,
         capture_output=True,

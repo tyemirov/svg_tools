@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import wave
+import signal
 from io import BytesIO
 from pathlib import Path
 from typing import Iterable
@@ -39,12 +40,16 @@ def wait_for_port(host: str, port: int, timeout_seconds: float) -> None:
 
 def stop_process(process: subprocess.Popen[str]) -> None:
     """Terminate a subprocess and wait."""
-    process.terminate()
+    process.send_signal(signal.SIGINT)
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=3)
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
 
 
 def start_grpc_server(repo_root: Path, port: int) -> subprocess.Popen[str]:

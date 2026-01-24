@@ -255,3 +255,6 @@ proceed
 - [x] [I129] Split audio_to_text into a standalone UI, HTTP backend orchestrator, and gRPC aligner with a 3-service Docker Compose stack. Resolved with the new backend package, standalone UI assets, stack compose/env updates, and integration coverage for backend job flow/SSE.
 - [ ] [I131] Inject a test alignment runner into audio_to_text_grpc so the gRPC service always uses a single alignment pipeline with an injected runner.
 - [x] [I131] Inject a test alignment runner into audio_to_text_grpc so the gRPC service always uses a single alignment pipeline with an injected runner. Resolved with alignment runner injection and startup selection for test mode.
+- [ ] [I132] Wire pytest-cov into make ci with subprocess coverage capture and a coverage gate.
+- [x] [I132] Wire pytest-cov into make ci with subprocess coverage capture and a coverage gate. Resolved with coverage config, subprocess hook, Python-based CLI invocation in tests, and CI coverage reporting/gating.
+- [ ] [I133] Raise CI coverage gate to 100% by expanding integration coverage for audio_to_text, audio_to_text_backend, and render_text_video.

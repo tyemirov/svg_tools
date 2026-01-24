@@ -9,6 +9,7 @@ import struct
 import subprocess
 import wave
 import zlib
+import sys
 from pathlib import Path
 from typing import List
 
@@ -37,7 +38,7 @@ ENTRY_FIRST_SEEDS = {
 def run_render_text_video(args: List[str], repo_root: Path) -> subprocess.CompletedProcess[str]:
     """Run render_text_video.py with the provided arguments."""
     return subprocess.run(
-        args,
+        [sys.executable, *args],
         cwd=repo_root,
         text=True,
         capture_output=True,
