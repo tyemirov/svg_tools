@@ -2,6 +2,7 @@
 .DS_Store
 assets/
 data/inputs
+data/hf-cache/
 /OpenSans-*.ttf
 
 PLAN.md
