@@ -25,6 +25,7 @@ using inline PEP 723 metadata.
 - `render_text_video.py`: renders animated word-by-word text into a MOV (ProRes for alpha, H.264 for opaque), with optional audio track muxing and a background-only mode when no text input is supplied.
 - `text_to_svg.py`: converts text into a single-path SVG using a font file.
 - `to_favicons.py`: generates a favicon package and HTML head snippet from a source SVG.
+- `audio_to_text_grpc.py`: gRPC backend for forced-aligning a transcript to a streamed WAV and returning word-level timings (and SRT).
 
 ## External dependencies
 - Python 3.11+ and `uv` on PATH.
