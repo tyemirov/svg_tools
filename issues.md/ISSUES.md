@@ -223,6 +223,7 @@ proceed
 - [x] [I124] Allow deleting completed audio_to_text UI jobs. Resolved with a trash icon action, DELETE endpoint, persisted job store removal, and integration coverage for the API.
 - [x] [I125] Allow deleting failed audio_to_text UI jobs. Resolved by widening deletion to finished jobs (completed/failed) and extending integration coverage.
 - [x] [I126] Name audio_to_text SRT downloads after the input audio/video file. Resolved by using the input filename for the stored output path and Content-Disposition header.
+- [x] [I127] Dockerize audio_to_text_grpc and document cache mounts for Hugging Face and Torch. Resolved with dedicated Dockerfiles/compose, a shared env example, and README updates.
 
 ## Maintenance Addendum (400–499)
 

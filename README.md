@@ -301,6 +301,28 @@ docker compose -f docker/audio_to_text/docker-compose.yml run --rm --entrypoint 
 
 ---
 
+### `audio_to_text_grpc.py`
+
+gRPC backend for forced alignment: client-stream a WAV + transcript and receive word-level timestamps (and SRT).
+
+**Docker (Linux)**
+
+Create the shared env file:
+
+```shell
+cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
+```
+
+Development (bind-mounts the repo for local changes):
+
+```shell
+docker compose -f docker/audio_to_text_grpc/docker-compose.yml up --build
+```
+
+The service caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` via bind mounts.
+
+---
+
 ### `text_to_svg.py`
 
 Render any text into a valid single-path SVG file.
