@@ -381,6 +381,11 @@ def write_srt_file(target_path: Path, content: str) -> None:
     target_path.write_text(content, encoding="utf-8")
 
 
+def write_sbv_file(target_path: Path, content: str) -> None:
+    """Write SBV content to disk."""
+    target_path.write_text(content, encoding="utf-8")
+
+
 def write_png(
     target_path: Path, width: int, height: int, color: tuple[int, int, int, int]
 ) -> None:
@@ -491,6 +496,62 @@ def test_srt_success(tmp_path: Path) -> None:
     args = build_common_args(
         script_path=script_path,
         input_path=srt_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.8",
+        fps="6",
+    )
+
+    result = run_render_text_video(args, repo_root)
+
+    assert result.returncode == 0
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+
+
+def test_sbv_window_too_small(tmp_path: Path) -> None:
+    """Fail when an SBV window is too short for its words."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    sbv_content = "0:00:00.000,0:00:00.200\nalpha beta gamma delta\n"
+    sbv_path = tmp_path / "short.sbv"
+    write_sbv_file(sbv_path, sbv_content)
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=sbv_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds="0.6",
+        fps="6",
+    )
+
+    result = run_render_text_video(args, repo_root)
+
+    assert result.returncode != 0
+    assert "render_text_video.input.invalid_window" in result.stderr
+
+
+def test_sbv_success(tmp_path: Path) -> None:
+    """Render a short SBV successfully."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    sbv_content = (
+        "0:00:00.000,0:00:00.400\nhello world\n\n"
+        "0:00:00.400,0:00:00.800\nsecond line\n"
+    )
+    sbv_path = tmp_path / "ok.sbv"
+    write_sbv_file(sbv_path, sbv_content)
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=sbv_path,
         output_path=output_path,
         fonts_dir=fonts_dir,
         duration_seconds="0.8",
@@ -1160,6 +1221,70 @@ def test_rsvp_orp_punctuation_pause_extends_word(tmp_path: Path) -> None:
     assert counts[words[0]] == base_frames + pause_frames
     assert counts[words[1]] == base_frames
     assert counts[words[0]] + counts[words[1]] == total_frames
+
+
+def test_rsvp_orp_allows_short_window_best_effort(tmp_path: Path) -> None:
+    """Allow RSVP windows shorter than the default per-word timing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    width = 240
+    height = 180
+    duration_seconds = "0.4"
+    fps = "30"
+
+    srt_content = "1\n00:00:00,000 --> 00:00:00,200\nalpha beta gamma\n"
+    input_path = tmp_path / "short.srt"
+    input_path.write_text(srt_content, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    args.extend(["--subtitle-renderer", "rsvp_orp"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    assert output_path.exists()
+
+
+def test_rsvp_orp_allows_sub_frame_window(tmp_path: Path) -> None:
+    """Allow RSVP windows shorter than a single frame."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "render_text_video.py"
+    fonts_dir = get_test_fonts_dir(repo_root)
+
+    width = 240
+    height = 180
+    duration_seconds = "0.2"
+    fps = "30"
+
+    srt_content = "1\n00:00:00,013 --> 00:00:00,015\nalpha\n"
+    input_path = tmp_path / "sub-frame.srt"
+    input_path.write_text(srt_content, encoding="utf-8")
+
+    output_path = tmp_path / "out.mov"
+    args = build_common_args(
+        script_path=script_path,
+        input_path=input_path,
+        output_path=output_path,
+        fonts_dir=fonts_dir,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+    args.extend(["--subtitle-renderer", "rsvp_orp"])
+    result = run_render_text_video(args, repo_root)
+    assert result.returncode == 0
+    assert output_path.exists()
 
 
 def test_rsvp_orp_allows_long_window(tmp_path: Path) -> None:
