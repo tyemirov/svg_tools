@@ -22,10 +22,13 @@ import math
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import time
 import uuid
+import warnings
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from email.message import Message
@@ -39,19 +42,21 @@ from pathlib import Path
 from string import Template
 from types import ModuleType
 from typing import BinaryIO, Callable, Iterable, Sequence
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 LOGGER = logging.getLogger("audio_to_text")
 
 INPUT_AUDIO_CODE = "audio_to_text.input.audio_file"
 INPUT_TEXT_CODE = "audio_to_text.input.text_file"
+INPUT_ALIGNMENT_JSON_CODE = "audio_to_text.input.alignment_json_file"
 OUTPUT_SRT_CODE = "audio_to_text.output.srt_file"
 INVALID_CONFIG_CODE = "audio_to_text.input.invalid_config"
 INVALID_LANGUAGE_CODE = "audio_to_text.input.invalid_language"
 ALIGN_MODEL_CODE = "audio_to_text.align.model"
 ALIGNMENT_CODE = "audio_to_text.align.failed"
 ALIGNMENT_TIMESTAMP_CODE = "audio_to_text.align.missing_timestamps"
+ALIGNMENT_INFERRED_TIMESTAMPS_CODE = "audio_to_text.align.inferred_timestamps"
 DEVICE_UNAVAILABLE_CODE = "audio_to_text.device.unavailable"
 TORCH_VERSION_CODE = "audio_to_text.dependency.torch_version"
 TORCHAUDIO_METADATA_CODE = "audio_to_text.dependency.torchaudio_metadata"
@@ -111,6 +116,7 @@ SUPPORTED_ALIGNMENT_LANGUAGES = (
 SUPPORTED_LANGUAGE_CODES = {code for code, _ in SUPPORTED_ALIGNMENT_LANGUAGES}
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 7860
+DEFAULT_UI_ROOT_DIR = ""
 MAX_PORT = 65535
 TORCH_MIN_VERSION = (2, 6)
 TORCH_MIN_VERSION_TEXT = "2.6"
@@ -170,11 +176,13 @@ class AlignmentRequest:
     mode: RequestMode
     input_audio: str | None
     input_text: str | None
+    input_alignment_json: str | None
     output_srt: str | None
     language: str
     device: str
     ui_host: str
     ui_port: int
+    ui_root_dir: str
 
     def __post_init__(self) -> None:
         if not self.language.strip():
@@ -189,15 +197,36 @@ class AlignmentRequest:
             raise AlignmentValidationError(
                 INVALID_CONFIG_CODE, f"invalid device: {self.device!r}"
             )
+        if self.device != DEVICE_AUTO:
+            raise AlignmentValidationError(
+                INVALID_CONFIG_CODE,
+                "device is fixed to auto; omit --device",
+            )
         if self.mode == RequestMode.CLI:
-            if self.input_audio is None or not self.input_audio.strip():
-                raise AlignmentValidationError(
-                    INPUT_AUDIO_CODE, "input-audio is required"
-                )
-            if self.input_text is None or not self.input_text.strip():
-                raise AlignmentValidationError(
-                    INPUT_TEXT_CODE, "input-text is required"
-                )
+            if self.input_alignment_json is None:
+                if self.input_audio is None or not self.input_audio.strip():
+                    raise AlignmentValidationError(
+                        INPUT_AUDIO_CODE, "input-audio is required"
+                    )
+                if self.input_text is None or not self.input_text.strip():
+                    raise AlignmentValidationError(
+                        INPUT_TEXT_CODE, "input-text is required"
+                    )
+            else:
+                if not self.input_alignment_json.strip():
+                    raise AlignmentValidationError(
+                        INPUT_ALIGNMENT_JSON_CODE,
+                        "input-alignment-json must be non-empty",
+                    )
+                if (
+                    self.input_audio is not None
+                    or self.input_text is not None
+                ):
+                    raise AlignmentValidationError(
+                        INVALID_CONFIG_CODE,
+                        "input-alignment-json cannot be combined with input-audio/input-text",
+                    )
+
             if self.output_srt is None or not self.output_srt.strip():
                 raise AlignmentValidationError(
                     INVALID_CONFIG_CODE, "output-srt must be non-empty"
@@ -214,6 +243,10 @@ class AlignmentRequest:
             if self.ui_port <= 0 or self.ui_port > MAX_PORT:
                 raise AlignmentValidationError(
                     INVALID_CONFIG_CODE, "ui-port is invalid"
+                )
+            if self.ui_root_dir and not self.ui_root_dir.strip():
+                raise AlignmentValidationError(
+                    INVALID_CONFIG_CODE, "ui-root-dir must be non-empty"
                 )
 
 
@@ -246,7 +279,7 @@ class UiDefaults:
     """Default configuration values for the UI."""
 
     language: str
-    device: str
+    remove_punctuation: bool
 
 
 @dataclass(frozen=True)
@@ -270,15 +303,17 @@ class UploadForm:
     audio: UploadFile
     text: UploadFile
     language: str
-    device: str
+    remove_punctuation: bool
 
     def __post_init__(self) -> None:
         if not self.language.strip():
             raise AlignmentValidationError(
                 UI_UPLOAD_CODE, "language is required"
             )
-        if not self.device.strip():
-            raise AlignmentValidationError(UI_UPLOAD_CODE, "device is required")
+        if not isinstance(self.remove_punctuation, bool):
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE, "remove_punctuation must be a boolean"
+            )
 
 
 @dataclass(frozen=True)
@@ -288,7 +323,7 @@ class AlignmentJobInput:
     audio_filename: str
     text_filename: str
     language: str
-    device: str
+    remove_punctuation: bool
     audio_path: str
     text_path: str
     output_path: str
@@ -306,9 +341,10 @@ class AlignmentJobInput:
             raise AlignmentPipelineError(
                 INVALID_JOB_INPUT_CODE, "language is required"
             )
-        if not self.device.strip():
+        if not isinstance(self.remove_punctuation, bool):
             raise AlignmentPipelineError(
-                INVALID_JOB_INPUT_CODE, "device is required"
+                INVALID_JOB_INPUT_CODE,
+                "remove_punctuation must be a boolean",
             )
         if not self.audio_path.strip():
             raise AlignmentPipelineError(
@@ -448,6 +484,16 @@ def parse_job_optional_float(value: object, label: str) -> float | None:
         )
     return float(value)
 
+def parse_job_optional_bool(value: object, label: str) -> bool | None:
+    """Parse an optional boolean value."""
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise AlignmentPipelineError(
+            INVALID_JOB_RESULT_CODE, f"{label} must be a boolean"
+        )
+    return value
+
 
 def parse_job_status(value: object) -> JobStatus:
     """Parse a job status value."""
@@ -481,6 +527,11 @@ def parse_alignment_job(job_id: str, payload: object) -> AlignmentJob:
     created_at = parse_job_float(data.get("created_at"), "created_at")
     input_payload = parse_job_dict(data.get("input"), "input")
     result_payload = parse_job_dict(data.get("result"), "result")
+    remove_punctuation = parse_job_optional_bool(
+        input_payload.get("remove_punctuation"), "remove_punctuation"
+    )
+    if remove_punctuation is None:
+        remove_punctuation = True
     job_input = AlignmentJobInput(
         audio_filename=parse_job_string(
             input_payload.get("audio_filename"), "audio_filename"
@@ -489,7 +540,7 @@ def parse_alignment_job(job_id: str, payload: object) -> AlignmentJob:
             input_payload.get("text_filename"), "text_filename"
         ),
         language=parse_job_string(input_payload.get("language"), "language"),
-        device=parse_job_string(input_payload.get("device"), "device"),
+        remove_punctuation=remove_punctuation,
         audio_path=parse_job_string(input_payload.get("audio_path"), "audio_path"),
         text_path=parse_job_string(input_payload.get("text_path"), "text_path"),
         output_path=parse_job_string(
@@ -524,7 +575,7 @@ def serialize_alignment_job(job: AlignmentJob) -> dict[str, object]:
             "audio_filename": job.job_input.audio_filename,
             "text_filename": job.job_input.text_filename,
             "language": job.job_input.language,
-            "device": job.job_input.device,
+            "remove_punctuation": job.job_input.remove_punctuation,
             "audio_path": job.job_input.audio_path,
             "text_path": job.job_input.text_path,
             "output_path": job.job_input.output_path,
@@ -759,6 +810,47 @@ class JobStore:
         """Return the directory for job artifacts."""
         return self.root_dir / job_id
 
+    def delete_finished_job(self, job_id: str) -> AlignmentJob:
+        """Delete a finished job and its artifacts."""
+        with self.condition:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE, f"job not found: {job_id}"
+                )
+            if job.result.status not in (JobStatus.COMPLETED, JobStatus.FAILED):
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    "only finished jobs can be deleted",
+                )
+            job_dir = self.job_dir(job_id)
+
+        if job_dir.exists():
+            try:
+                shutil.rmtree(job_dir)
+            except OSError as exc:
+                raise AlignmentPipelineError(
+                    UI_STORAGE_CODE,
+                    f"job artifacts delete failed: {exc}",
+                ) from exc
+
+        with self.condition:
+            current = self.jobs.get(job_id)
+            if current is None:
+                return job
+            if current.result.status not in (JobStatus.COMPLETED, JobStatus.FAILED):
+                raise AlignmentPipelineError(
+                    INVALID_JOB_RESULT_CODE,
+                    "job was updated while deleting",
+                )
+            del self.jobs[job_id]
+            self.job_order = [value for value in self.job_order if value != job_id]
+            self.change_id += 1
+            payload = self.build_state_payload()
+            self.save_state(payload)
+            self.condition.notify_all()
+        return current
+
 
 def estimate_alignment_seconds(audio_duration: float, device: str) -> float:
     """Estimate alignment runtime for progress updates."""
@@ -812,6 +904,8 @@ class AlignmentProgressTracker:
 def configure_logging() -> None:
     """Configure logging for CLI output."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.captureWarnings(True)
+    warnings.simplefilter("default")
 
 
 def ensure_linux_runtime() -> None:
@@ -829,6 +923,18 @@ def resolve_ui_root_dir() -> Path:
         / "data"
         / "audio_to_text_uploads"
     )
+    try:
+        root_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AlignmentPipelineError(
+            UI_STORAGE_CODE, f"failed to create upload directory: {root_dir}"
+        ) from exc
+    return root_dir
+
+
+def resolve_ui_root_dir_override(ui_root_dir: str) -> Path:
+    """Resolve the UI uploads directory override."""
+    root_dir = Path(ui_root_dir).expanduser()
     try:
         root_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -902,12 +1008,41 @@ def normalize_transcript(text_value: str, input_text_path: str) -> str:
         if is_srt_text(input_text_path, text_value)
         else text_value
     )
-    normalized = " ".join(sanitized.replace("\ufeff", "").split())
+    without_bom = sanitized.replace("\ufeff", "")
+    normalized = " ".join(without_bom.split())
     if not normalized:
         raise AlignmentValidationError(
             INVALID_CONFIG_CODE, "input text contains no words"
         )
     return normalized
+
+
+def normalize_transcript_for_alignment(
+    text_value: str,
+    input_text_path: str,
+    remove_punctuation: bool,
+) -> str:
+    """Normalize transcript text for alignment work."""
+    normalized = normalize_transcript(text_value, input_text_path)
+    if not remove_punctuation:
+        return normalized
+    stripped = " ".join(remove_punctuation_from_transcript(normalized).split())
+    if not stripped:
+        raise AlignmentValidationError(
+            INVALID_CONFIG_CODE,
+            "input text contains no words after punctuation removal",
+        )
+    return stripped
+
+def remove_punctuation_from_transcript(text_value: str) -> str:
+    """Replace punctuation characters with spaces."""
+    replaced: list[str] = []
+    for character in text_value:
+        if unicodedata.category(character).startswith("P"):
+            replaced.append(" ")
+        else:
+            replaced.append(character)
+    return "".join(replaced)
 
 
 def default_output_path(input_audio: str) -> str:
@@ -1138,7 +1273,7 @@ def parse_upload_form(
 ) -> UploadForm:
     """Parse the upload form into a structured payload."""
     message = parse_multipart_message(content_type, body)
-    allowed_fields = {"audio", "text", "language", "device"}
+    allowed_fields = {"audio", "text", "language", "device", "remove_punctuation"}
     fields: dict[str, str] = {}
     files: dict[str, UploadFile] = {}
     for part in message.iter_parts():
@@ -1173,24 +1308,37 @@ def parse_upload_form(
     audio = require_upload(files, "audio")
     text = require_upload(files, "text")
     language_raw = require_form_field(fields, "language")
-    device_raw = require_form_field(fields, "device")
+    device_raw = fields.get("device", "").strip().lower()
+    remove_punctuation_raw = fields.get("remove_punctuation", "")
     if not language_raw.strip():
         raise AlignmentValidationError(
             UI_UPLOAD_CODE, "language must be provided"
         )
-    if not device_raw.strip():
-        raise AlignmentValidationError(
-            UI_UPLOAD_CODE, "device must be provided"
+    if device_raw and device_raw != DEVICE_AUTO:
+        LOGGER.warning(
+            "audio_to_text.ui.upload.ignored_device: %s",
+            device_raw,
         )
     language_value = normalize_language_value(
         language_raw, defaults.language
     )
-    device_value = normalize_device_value(device_raw, defaults.device)
+    remove_punctuation_value = defaults.remove_punctuation
+    if remove_punctuation_raw.strip():
+        token = remove_punctuation_raw.strip().lower()
+        if token in ("1", "true", "on", "yes"):
+            remove_punctuation_value = True
+        elif token in ("0", "false", "off", "no"):
+            remove_punctuation_value = False
+        else:
+            raise AlignmentValidationError(
+                UI_UPLOAD_CODE,
+                f"remove_punctuation must be a boolean: {remove_punctuation_raw!r}",
+            )
     return UploadForm(
         audio=audio,
         text=text,
         language=language_value,
-        device=device_value,
+        remove_punctuation=remove_punctuation_value,
     )
 
 
@@ -1200,8 +1348,10 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
     parser.add_argument("--ui", action="store_true")
     parser.add_argument("--ui-host", default=DEFAULT_UI_HOST)
     parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT)
+    parser.add_argument("--ui-root-dir", default=DEFAULT_UI_ROOT_DIR)
     parser.add_argument("--input-audio")
     parser.add_argument("--input-text")
+    parser.add_argument("--input-alignment-json")
     parser.add_argument("--output-srt", default=None)
     parser.add_argument("--language", default="en")
     parser.add_argument("--device", default=DEVICE_AUTO)
@@ -1210,17 +1360,23 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
     mode = RequestMode.UI if parsed.ui else RequestMode.CLI
     input_audio = parsed.input_audio
     input_text = parsed.input_text
+    input_alignment_json = parsed.input_alignment_json
     output_srt = None
     if mode == RequestMode.CLI:
-        if input_audio is None:
-            raise AlignmentValidationError(
-                INPUT_AUDIO_CODE, "input-audio is required"
+        if input_alignment_json is not None:
+            output_srt = parsed.output_srt or str(
+                Path(input_alignment_json).with_suffix(".srt")
             )
-        if input_text is None:
-            raise AlignmentValidationError(
-                INPUT_TEXT_CODE, "input-text is required"
-            )
-        output_srt = parsed.output_srt or default_output_path(input_audio)
+        else:
+            if input_audio is None:
+                raise AlignmentValidationError(
+                    INPUT_AUDIO_CODE, "input-audio is required"
+                )
+            if input_text is None:
+                raise AlignmentValidationError(
+                    INPUT_TEXT_CODE, "input-text is required"
+                )
+            output_srt = parsed.output_srt or default_output_path(input_audio)
 
     language_value = str(parsed.language).strip().lower()
     device_value = str(parsed.device).strip().lower() or DEVICE_AUTO
@@ -1228,11 +1384,13 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
         mode=mode,
         input_audio=input_audio,
         input_text=input_text,
+        input_alignment_json=input_alignment_json,
         output_srt=output_srt,
         language=language_value,
         device=device_value,
         ui_host=str(parsed.ui_host),
         ui_port=int(parsed.ui_port),
+        ui_root_dir=str(parsed.ui_root_dir),
     )
 
 
@@ -1272,6 +1430,7 @@ def align_words(
     language: str,
     device: str,
     progress_tracker: AlignmentProgressTracker | None = None,
+    remove_punctuation: bool = False,
 ) -> tuple[AlignedWord, ...]:
     """Align transcript text to the audio and return word timings."""
     alignment_module, audio_module = load_whisperx_alignment_modules()
@@ -1301,17 +1460,225 @@ def align_words(
         if progress_tracker is not None:
             progress_tracker.stop()
 
-    return extract_aligned_words(result.get("segments", []))
+    return extract_aligned_words(
+        result.get("segments", []),
+        remove_punctuation=remove_punctuation,
+    )
+
+
+def is_punctuation_token(text_value: str) -> bool:
+    """Return True when text contains no alphanumeric characters."""
+    return bool(text_value) and not any(
+        character.isalnum() for character in text_value
+    )
+
+
+def strip_punctuation_from_token(text_value: str) -> str:
+    """Remove punctuation characters from a token."""
+    kept: list[str] = []
+    for character in text_value:
+        if unicodedata.category(character).startswith("P"):
+            continue
+        kept.append(character)
+    return "".join(kept).strip()
+
+
+def merge_punctuation_suffix(
+    words: list[AlignedWord],
+    punctuation: str,
+) -> None:
+    """Merge punctuation into the previous word."""
+    if not words:
+        raise AlignmentPipelineError(
+            ALIGNMENT_TIMESTAMP_CODE,
+            f"cannot merge punctuation without a previous word: {punctuation}",
+        )
+    previous = words[-1]
+    merged = AlignedWord(
+        text=f"{previous.text} {punctuation}",
+        start_seconds=previous.start_seconds,
+        end_seconds=previous.end_seconds,
+    )
+    words[-1] = merged
+
+
+def merge_punctuation_suffix_token(
+    tokens: list[dict[str, object]],
+    words: list[AlignedWord],
+    punctuation: str,
+) -> None:
+    """Merge punctuation into the most recent token."""
+    if tokens:
+        previous_text = str(tokens[-1].get("text", "")).strip()
+        tokens[-1]["text"] = f"{previous_text} {punctuation}".strip()
+        return
+    if words:
+        merge_punctuation_suffix(words, punctuation)
+        return
+    raise AlignmentPipelineError(
+        ALIGNMENT_TIMESTAMP_CODE,
+        f"cannot merge punctuation without a previous word: {punctuation}",
+    )
+
+
+def segment_bounds(
+    segment: dict[str, object],
+    fallback: tuple[float, float] | None,
+) -> tuple[float, float]:
+    """Resolve segment start and end bounds."""
+    start = segment.get("start")
+    end = segment.get("end")
+    if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+        start_seconds = float(start)
+        end_seconds = float(end)
+        if end_seconds > start_seconds:
+            return start_seconds, end_seconds
+    if fallback is None:
+        raise AlignmentPipelineError(
+            ALIGNMENT_TIMESTAMP_CODE,
+            "segment is missing valid timestamps; cannot infer word timings",
+        )
+    return fallback
+
+
+def segment_bounds_from_tokens(
+    tokens: list[dict[str, object]],
+) -> tuple[float, float] | None:
+    """Derive segment bounds from token timings."""
+    starts: list[float] = []
+    ends: list[float] = []
+    for token in tokens:
+        start = token.get("start")
+        end = token.get("end")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            start_value = float(start)
+            end_value = float(end)
+            if end_value > start_value:
+                starts.append(start_value)
+                ends.append(end_value)
+    if not starts or not ends:
+        return None
+    return min(starts), max(ends)
+
+
+def token_weight(text_value: str) -> int:
+    """Return the distribution weight for a token."""
+    compact = "".join(part for part in text_value.split() if part)
+    return max(1, len(compact))
+
+
+def infer_missing_timings(
+    tokens: list[dict[str, object]],
+    segment_start: float,
+    segment_end: float,
+) -> None:
+    """Fill missing token timestamps in place."""
+    missing_texts: list[str] = []
+    for token in tokens:
+        start = token.get("start")
+        end = token.get("end")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            token["start"] = float(start)
+            token["end"] = float(end)
+            continue
+        token["start"] = None
+        token["end"] = None
+        missing_texts.append(str(token.get("text", "")).strip())
+
+    if not missing_texts:
+        return
+
+    preview = ", ".join(missing_texts[:8])
+    extra = "" if len(missing_texts) <= 8 else f" (+{len(missing_texts) - 8} more)"
+    LOGGER.warning(
+        "%s: inferring timestamps for %d token(s): %s%s",
+        ALIGNMENT_INFERRED_TIMESTAMPS_CODE,
+        len(missing_texts),
+        preview,
+        extra,
+    )
+
+    index = 0
+    while index < len(tokens):
+        if isinstance(tokens[index].get("start"), float):
+            index += 1
+            continue
+        run_start = index
+        while index < len(tokens) and tokens[index].get("start") is None:
+            index += 1
+        run_end = index
+
+        left_bound = segment_start
+        if run_start > 0:
+            prev_end = tokens[run_start - 1].get("end")
+            if isinstance(prev_end, float):
+                left_bound = prev_end
+        right_bound = segment_end
+        if run_end < len(tokens):
+            next_start = tokens[run_end].get("start")
+            if isinstance(next_start, float):
+                right_bound = next_start
+        if right_bound <= left_bound:
+            right_bound = left_bound + (0.001 * float(run_end - run_start))
+
+        window_seconds = right_bound - left_bound
+        weights = [
+            token_weight(str(tokens[i].get("text", "")).strip())
+            for i in range(run_start, run_end)
+        ]
+        total_weight = float(sum(weights)) or 1.0
+        cursor = left_bound
+        for offset, weight in enumerate(weights):
+            share = window_seconds * (float(weight) / total_weight)
+            start_seconds = cursor
+            end_seconds = cursor + share
+            if end_seconds <= start_seconds:
+                end_seconds = start_seconds + 0.001
+            token = tokens[run_start + offset]
+            token["start"] = start_seconds
+            token["end"] = end_seconds
+            cursor = end_seconds
 
 
 def extract_aligned_words(
     segments: Iterable[dict[str, object]],
+    remove_punctuation: bool = False,
 ) -> tuple[AlignedWord, ...]:
     """Extract aligned words from alignment output."""
     words: list[AlignedWord] = []
+    pending_prefix_tokens: list[str] = []
     for segment in segments:
-        for word in segment.get("words", []):
-            text_value = str(word.get("word", "")).strip()
+        if not isinstance(segment, dict):
+            raise AlignmentPipelineError(
+                ALIGNMENT_CODE, "alignment segment payload must be an object"
+            )
+        raw_words = segment.get("words", [])
+        if not isinstance(raw_words, list):
+            raise AlignmentPipelineError(
+                ALIGNMENT_CODE, "alignment segment words must be a list"
+            )
+
+        tokens: list[dict[str, object]] = []
+        for word in raw_words:
+            if not isinstance(word, dict):
+                raise AlignmentPipelineError(
+                    ALIGNMENT_CODE, "alignment word payload must be an object"
+                )
+            raw_text = str(word.get("word", "")).strip()
+            text_value = raw_text
+            if remove_punctuation:
+                text_value = strip_punctuation_from_token(raw_text)
+                if not text_value:
+                    if is_punctuation_token(raw_text):
+                        LOGGER.info(
+                            "audio_to_text.align.dropped_punctuation: %s",
+                            raw_text,
+                        )
+                        continue
+                    raise AlignmentPipelineError(
+                        ALIGNMENT_TIMESTAMP_CODE,
+                        "aligned word text is empty after punctuation removal",
+                    )
             start = word.get("start")
             end = word.get("end")
             if text_value == "":
@@ -1319,15 +1686,68 @@ def extract_aligned_words(
                     ALIGNMENT_TIMESTAMP_CODE, "aligned word text is empty"
                 )
             if start is None or end is None:
+                if remove_punctuation and is_punctuation_token(text_value):
+                    LOGGER.warning(
+                        "%s: dropping punctuation with missing timestamps: %s",
+                        ALIGNMENT_TIMESTAMP_CODE,
+                        text_value,
+                    )
+                    continue
+                if is_punctuation_token(text_value):
+                    if tokens:
+                        LOGGER.warning(
+                            "%s: merging punctuation with missing timestamps: %s",
+                            ALIGNMENT_TIMESTAMP_CODE,
+                            text_value,
+                        )
+                        merge_punctuation_suffix_token(tokens, words, text_value)
+                    elif words:
+                        LOGGER.warning(
+                            "%s: merging punctuation with missing timestamps: %s",
+                            ALIGNMENT_TIMESTAMP_CODE,
+                            text_value,
+                        )
+                        merge_punctuation_suffix_token(tokens, words, text_value)
+                    else:
+                        LOGGER.warning(
+                            "%s: carrying punctuation with missing timestamps: %s",
+                            ALIGNMENT_TIMESTAMP_CODE,
+                            text_value,
+                        )
+                        pending_prefix_tokens.append(text_value)
+                    continue
+
+            if remove_punctuation and is_punctuation_token(text_value):
+                LOGGER.info(
+                    "audio_to_text.align.dropped_punctuation: %s",
+                    text_value,
+                )
+                continue
+
+            if pending_prefix_tokens:
+                text_value = " ".join([*pending_prefix_tokens, text_value])
+                pending_prefix_tokens.clear()
+            tokens.append({"text": text_value, "start": start, "end": end})
+
+        if not tokens:
+            continue
+
+        fallback = segment_bounds_from_tokens(tokens)
+        segment_start, segment_end = segment_bounds(segment, fallback)
+        infer_missing_timings(tokens, segment_start, segment_end)
+        for token in tokens:
+            start_value = token.get("start")
+            end_value = token.get("end")
+            if not isinstance(start_value, float) or not isinstance(end_value, float):
                 raise AlignmentPipelineError(
                     ALIGNMENT_TIMESTAMP_CODE,
-                    f"aligned word is missing timestamps: {text_value}",
+                    f"aligned word is missing timestamps: {token.get('text', '')}",
                 )
             words.append(
                 AlignedWord(
-                    text=text_value,
-                    start_seconds=float(start),
-                    end_seconds=float(end),
+                    text=str(token.get("text", "")).strip(),
+                    start_seconds=start_value,
+                    end_seconds=end_value,
                 )
             )
 
@@ -1337,6 +1757,38 @@ def extract_aligned_words(
         )
 
     return tuple(words)
+
+
+def read_alignment_result(file_path: str) -> dict[str, object]:
+    """Read a whisperx alignment result JSON file."""
+    try:
+        payload = json.loads(Path(file_path).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AlignmentValidationError(
+            INPUT_ALIGNMENT_JSON_CODE,
+            f"input alignment json not found: {file_path}",
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AlignmentValidationError(
+            INPUT_ALIGNMENT_JSON_CODE,
+            f"input alignment json is invalid: {file_path}",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AlignmentValidationError(
+            INPUT_ALIGNMENT_JSON_CODE, "input alignment json must be an object"
+        )
+    segments = payload.get("segments")
+    if not isinstance(segments, list):
+        raise AlignmentValidationError(
+            INPUT_ALIGNMENT_JSON_CODE, "input alignment json segments must be a list"
+        )
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise AlignmentValidationError(
+                INPUT_ALIGNMENT_JSON_CODE,
+                "input alignment json segments must contain objects",
+            )
+    return payload
 
 
 def srt_timestamp_from_seconds(seconds: float, rounding: str) -> int:
@@ -1398,14 +1850,34 @@ def write_srt_file(file_path: str, content: str) -> None:
         ) from exc
 
 
+def srt_filename_from_audio_filename(audio_filename: str) -> str:
+    """Derive an SRT filename from the original audio filename."""
+    base_name = Path(audio_filename).name
+    if not base_name:
+        return "alignment.srt"
+    return Path(base_name).with_suffix(".srt").name
+
+
+def content_disposition_attachment(filename: str) -> str:
+    """Build a Content-Disposition attachment header value."""
+    sanitized = filename.replace("\r", " ").replace("\n", " ").strip()
+    if not sanitized:
+        sanitized = "alignment.srt"
+    ascii_fallback = "".join(
+        char if 32 <= ord(char) < 127 and char not in {'"', "\\"} else "_"
+        for char in sanitized
+    ).strip()
+    if not ascii_fallback:
+        ascii_fallback = "alignment.srt"
+    encoded = quote(sanitized, safe="")
+    return (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{encoded}"
+    )
+
+
 def build_ui_html(defaults: UiDefaults) -> str:
     """Render the UI HTML with default values."""
-    device_options = []
-    for device_key, label in DEVICE_LABELS.items():
-        selected = " selected" if device_key == defaults.device else ""
-        device_options.append(
-            f'<option value="{escape(device_key)}"{selected}>{escape(label)}</option>'
-        )
     language_options = []
     for language_code, language_label in SUPPORTED_ALIGNMENT_LANGUAGES:
         selected = " selected" if language_code == defaults.language else ""
@@ -1413,6 +1885,9 @@ def build_ui_html(defaults: UiDefaults) -> str:
         language_options.append(
             f'<option value="{escape(language_code)}"{selected}>{escape(label_text)}</option>'
         )
+    remove_punctuation_checked = (
+        " checked" if defaults.remove_punctuation else ""
+    )
     template = Template(
         """<!doctype html>
 <html lang="en">
@@ -1554,7 +2029,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
       font-size: 0.85rem;
       color: var(--muted);
     }
-    .option input,
+    .option input:not([type="checkbox"]),
     .option select {
       width: 100%;
       padding: 10px 12px;
@@ -1564,6 +2039,23 @@ def build_ui_html(defaults: UiDefaults) -> str:
       font-size: 0.95rem;
       background: rgba(255, 255, 255, 0.9);
       color: var(--ink);
+    }
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      background: rgba(255, 255, 255, 0.9);
+      color: var(--ink);
+      font-size: 0.95rem;
+    }
+    .toggle input[type="checkbox"] {
+      margin: 0;
+      width: auto;
+      height: 16px;
+      accent-color: var(--accent-cool);
     }
     .actions {
       display: grid;
@@ -1605,6 +2097,26 @@ def build_ui_html(defaults: UiDefaults) -> str:
     .jobs {
       display: grid;
       gap: 12px;
+    }
+    .job-list {
+      max-height: min(52vh, 420px);
+      overflow-y: auto;
+      padding-right: 6px;
+      scrollbar-gutter: stable;
+    }
+    .job-list::-webkit-scrollbar {
+      width: 10px;
+    }
+    .job-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .job-list::-webkit-scrollbar-thumb {
+      background: rgba(29, 27, 25, 0.12);
+      border-radius: 999px;
+      border: 2px solid rgba(255, 255, 255, 0.6);
+    }
+    .job-list::-webkit-scrollbar-thumb:hover {
+      background: rgba(29, 27, 25, 0.18);
     }
     .jobs-header {
       display: flex;
@@ -1690,6 +2202,34 @@ def build_ui_html(defaults: UiDefaults) -> str:
       gap: 12px;
       align-items: center;
     }
+    .job-delete {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      background: rgba(255, 255, 255, 0.6);
+      cursor: pointer;
+      transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+    }
+    .job-delete svg {
+      width: 18px;
+      height: 18px;
+      stroke: #8a2a16;
+    }
+    .job-delete:hover {
+      background: rgba(241, 84, 45, 0.12);
+      border-color: rgba(241, 84, 45, 0.25);
+      transform: translateY(-1px);
+    }
+    .job-delete:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
     .job-download {
       display: inline-flex;
       align-items: center;
@@ -1741,7 +2281,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
     <section class="panel">
       <div class="drop-grid">
         <div class="dropzone" id="audio-zone">
-          <input id="audio-file" type="file" accept="audio/*,video/*">
+          <input id="audio-file" type="file" accept="audio/*,video/*,.wav,.wave,.mp3,.m4a,.aac,.flac,.ogg,.mp4,.mov,.m4v">
           <div class="drop-title">Audio or video file</div>
           <div class="drop-meta" id="audio-meta">Drop a file or click to browse</div>
         </div>
@@ -1759,14 +2299,15 @@ def build_ui_html(defaults: UiDefaults) -> str:
           </select>
         </label>
         <label class="option">
-          <span>Device</span>
-          <select id="device">
-            $device_options
-          </select>
+          <span>Remove punctuation</span>
+          <div class="toggle">
+            <input id="remove-punctuation" type="checkbox"$remove_punctuation_checked>
+            <span>Enabled</span>
+          </div>
         </label>
       </div>
       <div class="actions">
-        <button id="run-button" class="run-button">Align and Build SRT</button>
+        <button id="run-button" class="run-button" disabled>Align and Build SRT</button>
       </div>
       <div class="status">
         <div class="status-main" id="status-line">Ready to align.</div>
@@ -1794,15 +2335,82 @@ def build_ui_html(defaults: UiDefaults) -> str:
     const statusSub = document.getElementById("status-sub");
     const errorLine = document.getElementById("error-line");
     const languageInput = document.getElementById("language");
-    const deviceSelect = document.getElementById("device");
+    const removePunctuationInput = document.getElementById("remove-punctuation");
     const jobList = document.getElementById("job-list");
     const jobCount = document.getElementById("job-count");
     const jobEntries = new Map();
     let jobStream = null;
     let audioFile = null;
     let textFile = null;
+    let jobSubmitting = false;
+    let pendingSubmission = null;
+    let languageTouched = false;
     const defaultAudioMeta = audioMeta.textContent;
     const defaultTextMeta = textMeta.textContent;
+
+    function isOptimisticJobId(jobId) {
+      return typeof jobId === "string" && jobId.startsWith("local_");
+    }
+
+    function updateRunButtonState() {
+      runButton.disabled = jobSubmitting || !audioFile || !textFile;
+    }
+
+    function applyStoredLanguage() {
+      try {
+        const stored = window.localStorage ? window.localStorage.getItem("audio_to_text.language") : null;
+        if (!stored) {
+          return;
+        }
+        if (stored === languageInput.value) {
+          return;
+        }
+        languageInput.value = stored;
+        languageTouched = true;
+      } catch (error) {
+        return;
+      }
+    }
+
+    function persistLanguage(value) {
+      try {
+        if (!window.localStorage) {
+          return;
+        }
+        window.localStorage.setItem("audio_to_text.language", value);
+      } catch (error) {
+        return;
+      }
+    }
+
+    async function detectLanguageFromTextFile(file) {
+      if (!file || typeof file.slice !== "function" || typeof window.FileReader === "undefined") {
+        return null;
+      }
+      const maxBytes = 8192;
+      const slice = file.slice(0, maxBytes);
+      const reader = new FileReader();
+      const buffer = await new Promise((resolve) => {
+        reader.onerror = () => resolve(null);
+        reader.onload = () => resolve(reader.result || null);
+        reader.readAsArrayBuffer(slice);
+      });
+      if (!buffer || !(buffer instanceof ArrayBuffer)) {
+        return null;
+      }
+      let text = "";
+      try {
+        const decoder = new TextDecoder("utf-8", { fatal: false });
+        text = decoder.decode(buffer);
+      } catch (error) {
+        return null;
+      }
+      const hasCyrillic = /[\u0400-\u04FF]/.test(text);
+      if (hasCyrillic) {
+        return "ru";
+      }
+      return null;
+    }
 
     function setStatus(mainText, subText) {
       statusLine.textContent = mainText;
@@ -1834,6 +2442,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
       textFile = null;
       resetDropzone(audioZone, audioInput, audioMeta, defaultAudioMeta);
       resetDropzone(textZone, textInput, textMeta, defaultTextMeta);
+      updateRunButtonState();
     }
 
     function statusLabel(statusValue) {
@@ -1874,6 +2483,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
     function createJobEntry(job) {
       const card = document.createElement("div");
       card.className = "job-card";
+      card.dataset.jobId = String(job.job_id || "");
       const header = document.createElement("div");
       header.className = "job-header";
       const title = document.createElement("div");
@@ -1898,6 +2508,21 @@ def build_ui_html(defaults: UiDefaults) -> str:
       download.textContent = "Download SRT";
       download.href = "#";
       actions.appendChild(download);
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "job-delete hidden";
+      removeButton.title = "Delete finished job";
+      removeButton.setAttribute("aria-label", "Delete finished job");
+      removeButton.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6h18"></path>
+          <path d="M8 6V4h8v2"></path>
+          <path d="M6 6l1 16h10l1-16"></path>
+          <path d="M10 11v6"></path>
+          <path d="M14 11v6"></path>
+        </svg>
+      `;
+      actions.appendChild(removeButton);
       card.appendChild(header);
       card.appendChild(meta);
       card.appendChild(message);
@@ -1911,7 +2536,96 @@ def build_ui_html(defaults: UiDefaults) -> str:
         message,
         progressBar,
         download,
+        removeButton,
+        optimistic: Boolean(job.is_optimistic),
       };
+    }
+
+    function removeJobEntry(jobId) {
+      if (!jobId) {
+        return;
+      }
+      const entry = jobEntries.get(jobId);
+      if (!entry) {
+        return;
+      }
+      entry.card.remove();
+      jobEntries.delete(jobId);
+      updateJobCount();
+    }
+
+    function rekeyJobEntry(oldJobId, job) {
+      const entry = jobEntries.get(oldJobId);
+      if (!entry || !job || !job.job_id) {
+        return false;
+      }
+      const existing = jobEntries.get(job.job_id);
+      if (existing && existing !== entry) {
+        existing.card.remove();
+        jobEntries.delete(job.job_id);
+      }
+      jobEntries.delete(oldJobId);
+      entry.card.dataset.jobId = String(job.job_id);
+      entry.optimistic = false;
+      jobEntries.set(job.job_id, entry);
+      updateJobEntry(entry, job);
+      updateJobCount();
+      return true;
+    }
+
+    function claimPendingSubmission(job) {
+      if (!pendingSubmission || !job || !job.job_id || isOptimisticJobId(job.job_id)) {
+        return false;
+      }
+      if (job.audio_filename !== pendingSubmission.audio_filename) {
+        return false;
+      }
+      if (job.text_filename !== pendingSubmission.text_filename) {
+        return false;
+      }
+      if (job.language !== pendingSubmission.language) {
+        return false;
+      }
+      if (Boolean(job.remove_punctuation) !== pendingSubmission.remove_punctuation) {
+        return false;
+      }
+      const createdAt = typeof job.created_at === "number" ? job.created_at : null;
+      if (createdAt !== null && Math.abs(createdAt - pendingSubmission.created_at_seconds) > 90) {
+        return false;
+      }
+      if (rekeyJobEntry(pendingSubmission.optimisticJobId, job)) {
+        pendingSubmission = null;
+        return true;
+      }
+      return false;
+    }
+
+    async function deleteJob(jobId) {
+      clearError();
+      if (!jobId) {
+        return;
+      }
+      if (!confirm("Delete this job?")) {
+        return;
+      }
+      let response = null;
+      try {
+        response = await fetch("/api/jobs/" + jobId, { method: "DELETE" });
+      } catch (error) {
+        setError("Failed to delete the job.");
+        return;
+      }
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = {};
+      }
+      if (!response.ok) {
+        setError(payload.error || "Failed to delete the job.");
+        return;
+      }
+      loadJobs();
     }
 
     function updateJobEntry(entry, job) {
@@ -1919,13 +2633,13 @@ def build_ui_html(defaults: UiDefaults) -> str:
       const audioName = job.audio_filename || "Audio alignment";
       const textName = job.text_filename || "unknown text";
       const languageLabel = job.language ? job.language.toUpperCase() : "";
-      const deviceLabel = job.device ? job.device.toUpperCase() : "";
+      const removePunctuation = typeof job.remove_punctuation === "boolean" ? job.remove_punctuation : null;
       const metaParts = ["Text: " + textName];
       if (languageLabel) {
         metaParts.push("Lang: " + languageLabel);
       }
-      if (deviceLabel) {
-        metaParts.push("Device: " + deviceLabel);
+      if (removePunctuation !== null) {
+        metaParts.push(removePunctuation ? "Punct: removed" : "Punct: kept");
       }
       entry.title.textContent = audioName;
       entry.meta.textContent = metaParts.join(" • ");
@@ -1940,40 +2654,69 @@ def build_ui_html(defaults: UiDefaults) -> str:
       } else {
         entry.download.classList.add("hidden");
       }
+      if (statusValue === "completed" || statusValue === "failed") {
+        entry.removeButton.classList.remove("hidden");
+        entry.removeButton.disabled = false;
+        entry.removeButton.onclick = () => deleteJob(job.job_id);
+      } else {
+        entry.removeButton.classList.add("hidden");
+        entry.removeButton.disabled = true;
+        entry.removeButton.onclick = null;
+      }
     }
 
     function applyJobUpdate(job) {
       if (!job || !job.job_id) {
         return;
       }
+      if (claimPendingSubmission(job)) {
+        return;
+      }
       let entry = jobEntries.get(job.job_id);
       if (!entry) {
         entry = createJobEntry(job);
         jobEntries.set(job.job_id, entry);
+        jobList.prepend(entry.card);
+      }
+      if (!entry.card.isConnected) {
+        jobList.prepend(entry.card);
       }
       updateJobEntry(entry, job);
       updateJobCount();
     }
 
     function applyJobList(jobs) {
+      const sorted = Array.from(jobs).sort((left, right) => {
+        const leftTime = typeof left.created_at === "number" ? left.created_at : 0;
+        const rightTime = typeof right.created_at === "number" ? right.created_at : 0;
+        if (rightTime === leftTime) {
+          return String(right.job_id || "").localeCompare(String(left.job_id || ""));
+        }
+        return rightTime - leftTime;
+      });
       const seen = new Set();
-      jobs.forEach((job) => {
+      sorted.forEach((job) => {
         applyJobUpdate(job);
         seen.add(job.job_id);
       });
       for (const [jobId, entry] of jobEntries) {
-        if (!seen.has(jobId)) {
+        if (!seen.has(jobId) && !entry.optimistic) {
           entry.card.remove();
           jobEntries.delete(jobId);
         }
       }
       jobList.innerHTML = "";
-      jobs.forEach((job) => {
+      sorted.forEach((job) => {
         const entry = jobEntries.get(job.job_id);
         if (entry) {
           jobList.appendChild(entry.card);
         }
       });
+      for (const [jobId, entry] of jobEntries) {
+        if (entry.optimistic) {
+          jobList.prepend(entry.card);
+        }
+      }
       updateJobCount();
     }
 
@@ -2052,28 +2795,82 @@ def build_ui_html(defaults: UiDefaults) -> str:
       });
     }
 
-    wireDropzone(audioZone, audioInput, audioMeta, (file) => { audioFile = file; });
-    wireDropzone(textZone, textInput, textMeta, (file) => { textFile = file; });
+    wireDropzone(audioZone, audioInput, audioMeta, (file) => {
+      audioFile = file;
+      updateRunButtonState();
+    });
+    wireDropzone(textZone, textInput, textMeta, (file) => {
+      textFile = file;
+      removePunctuationInput.checked = true;
+      updateRunButtonState();
+      if (languageTouched) {
+        return;
+      }
+      detectLanguageFromTextFile(file).then((detected) => {
+        if (!detected || languageTouched) {
+          return;
+        }
+        languageInput.value = detected;
+        persistLanguage(detected);
+      });
+    });
+
+    languageInput.addEventListener("change", () => {
+      languageTouched = true;
+      persistLanguage(languageInput.value.trim());
+    });
 
     async function startJob() {
       clearError();
+      if (jobSubmitting) {
+        return;
+      }
       if (!audioFile || !textFile) {
         setError("Select both an audio file and a transcript file.");
         return;
       }
-      runButton.disabled = true;
+      const optimisticJobId = "local_" + Date.now().toString(16) + "_" + Math.random().toString(16).slice(2);
+      const languageValue = languageInput.value.trim();
+      const removePunctuationValue = removePunctuationInput.checked;
+      const optimisticJob = {
+        job_id: optimisticJobId,
+        status: "queued",
+        message: "Uploading files",
+        output_ready: false,
+        progress: 0.02,
+        audio_filename: audioFile.name,
+        text_filename: textFile.name,
+        language: languageValue,
+        remove_punctuation: removePunctuationValue,
+        created_at: Date.now() / 1000,
+        is_optimistic: true,
+      };
+      applyJobUpdate(optimisticJob);
+      pendingSubmission = {
+        optimisticJobId,
+        audio_filename: audioFile.name,
+        text_filename: textFile.name,
+        language: languageValue,
+        remove_punctuation: removePunctuationValue,
+        created_at_seconds: optimisticJob.created_at,
+      };
+      jobSubmitting = true;
+      updateRunButtonState();
       setStatus("Queued.", "Uploading files and preparing alignment.");
       const formData = new FormData();
       formData.append("audio", audioFile, audioFile.name);
       formData.append("text", textFile, textFile.name);
-      formData.append("language", languageInput.value.trim());
-      formData.append("device", deviceSelect.value);
+      formData.append("language", languageValue);
+      formData.append("remove_punctuation", removePunctuationValue ? "1" : "0");
       let response = null;
       try {
         response = await fetch("/api/jobs", { method: "POST", body: formData });
       } catch (error) {
         setError("Failed to submit the job.");
-        runButton.disabled = false;
+        removeJobEntry(optimisticJobId);
+        pendingSubmission = null;
+        jobSubmitting = false;
+        updateRunButtonState();
         return;
       }
       let payload = {};
@@ -2084,18 +2881,28 @@ def build_ui_html(defaults: UiDefaults) -> str:
       }
       if (!response.ok) {
         setError(payload.error || "Failed to start alignment.");
-        runButton.disabled = false;
+        removeJobEntry(optimisticJobId);
+        pendingSubmission = null;
+        jobSubmitting = false;
+        updateRunButtonState();
         return;
       }
-      applyJobUpdate(payload);
+      if (!claimPendingSubmission(payload) && !rekeyJobEntry(optimisticJobId, payload)) {
+        removeJobEntry(optimisticJobId);
+        applyJobUpdate(payload);
+      }
+      pendingSubmission = null;
       setStatus("Queued.", "Job added to the session.");
       resetInputs();
-      runButton.disabled = false;
+      jobSubmitting = false;
+      updateRunButtonState();
     }
 
     runButton.addEventListener("click", () => startJob());
     loadJobs();
     startJobStream();
+    applyStoredLanguage();
+    updateRunButtonState();
   </script>
 </body>
 </html>
@@ -2103,7 +2910,7 @@ def build_ui_html(defaults: UiDefaults) -> str:
     )
     return template.substitute(
         language_options="\n            ".join(language_options),
-        device_options="\n            ".join(device_options),
+        remove_punctuation_checked=remove_punctuation_checked,
     )
 
 
@@ -2111,9 +2918,13 @@ def run_ui_server(request: AlignmentRequest) -> int:
     """Run the web UI server."""
     defaults = UiDefaults(
         language=request.language,
-        device=request.device,
+        remove_punctuation=True,
     )
-    root_dir = resolve_ui_root_dir()
+    root_dir = (
+        resolve_ui_root_dir_override(request.ui_root_dir)
+        if request.ui_root_dir
+        else resolve_ui_root_dir()
+    )
     job_store = JobStore(
         root_dir=root_dir,
         clock=time.time,
@@ -2184,6 +2995,43 @@ def build_ui_handler(
                 return
             self.send_error_response(HTTPStatus.NOT_FOUND, "Not found")
 
+        def do_DELETE(self) -> None:
+            """Handle completed job deletion."""
+            parsed = urlparse(self.path)
+            if parsed.path.startswith("/api/jobs/"):
+                parts = parsed.path.split("/")
+                job_id = parts[3] if len(parts) > 3 else ""
+                if not job_id:
+                    self.send_error_response(
+                        HTTPStatus.BAD_REQUEST, "Job id is required"
+                    )
+                    return
+                try:
+                    store.delete_finished_job(job_id)
+                except AlignmentPipelineError as exc:
+                    if exc.code == INVALID_JOB_RESULT_CODE:
+                        message = str(exc).strip()
+                        if "job not found" in message:
+                            self.send_error_response(
+                                HTTPStatus.NOT_FOUND, "Job not found"
+                            )
+                            return
+                        self.send_error_response(
+                            HTTPStatus.CONFLICT, f"{exc.code}: {message}"
+                        )
+                        return
+                    self.send_error_response(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        f"{exc.code}: {str(exc).strip()}",
+                    )
+                    return
+                self.send_json(
+                    HTTPStatus.OK,
+                    {"deleted": True, "job_id": job_id},
+                )
+                return
+            self.send_error_response(HTTPStatus.NOT_FOUND, "Not found")
+
         def send_html(self, content: str) -> None:
             """Send HTML content."""
             payload = content.encode("utf-8")
@@ -2244,7 +3092,7 @@ def build_ui_handler(
                 "audio_filename": job.job_input.audio_filename,
                 "text_filename": job.job_input.text_filename,
                 "language": job.job_input.language,
-                "device": job.job_input.device,
+                "remove_punctuation": job.job_input.remove_punctuation,
                 "created_at": job.created_at,
                 "started_at": job.result.started_at,
                 "completed_at": job.result.completed_at,
@@ -2342,10 +3190,13 @@ def build_ui_handler(
                 self.send_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "SRT read failed")
                 return
             payload = content.encode("utf-8")
-            filename = f"{job_id}.srt"
+            filename = srt_filename_from_audio_filename(job.job_input.audio_filename)
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/x-subrip; charset=utf-8")
-            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header(
+                "Content-Disposition",
+                content_disposition_attachment(filename),
+            )
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
@@ -2377,7 +3228,7 @@ def build_ui_handler(
                 audio_filename=upload.audio.filename,
                 text_filename=upload.text.filename,
                 language=upload.language,
-                device=upload.device,
+                remove_punctuation=upload.remove_punctuation,
                 audio_path=str(audio_path),
                 text_path=str(text_path),
                 output_path=str(output_path),
@@ -2433,9 +3284,10 @@ def run_alignment_job(store: JobStore, job_id: str) -> None:
             message="Reading transcript text",
             progress=0.15,
         )
-        transcript_text = normalize_transcript(
+        transcript_text = normalize_transcript_for_alignment(
             read_utf8_text_strict(job_input.text_path),
             job_input.text_path,
+            remove_punctuation=job_input.remove_punctuation,
         )
         store.update_job(
             job_id,
@@ -2443,7 +3295,7 @@ def run_alignment_job(store: JobStore, job_id: str) -> None:
             message="Resolving device",
             progress=0.3,
         )
-        resolved_device = resolve_device(job_input.device)
+        resolved_device = resolve_device(DEVICE_AUTO)
         store.update_job(
             job_id,
             JobStatus.RUNNING,
@@ -2461,6 +3313,7 @@ def run_alignment_job(store: JobStore, job_id: str) -> None:
             job_input.language,
             resolved_device,
             progress_tracker=progress_tracker,
+            remove_punctuation=job_input.remove_punctuation,
         )
         store.update_job(
             job_id,
@@ -2514,17 +3367,28 @@ def main() -> int:
         ensure_linux_runtime()
         if request.mode == RequestMode.UI:
             return run_ui_server(request)
+        if request.input_alignment_json is not None:
+            result = read_alignment_result(request.input_alignment_json)
+            words = extract_aligned_words(
+                result.get("segments", []),
+            )
+            srt_content = build_srt(words)
+            write_srt_file(request.output_srt or "", srt_content)
+            LOGGER.info("audio_to_text.output.srt_written: %s", request.output_srt)
+            return 0
         ensure_audio_file_exists(request.input_audio or "")
-        transcript_text = normalize_transcript(
+        transcript_text = normalize_transcript_for_alignment(
             read_utf8_text_strict(request.input_text or ""),
             request.input_text or "",
+            remove_punctuation=False,
         )
-        resolved_device = resolve_device(request.device)
+        resolved_device = resolve_device(DEVICE_AUTO)
         words = align_words(
             request.input_audio or "",
             transcript_text,
             request.language,
             resolved_device,
+            remove_punctuation=False,
         )
         srt_content = build_srt(words)
         write_srt_file(request.output_srt or "", srt_content)
