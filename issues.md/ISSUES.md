@@ -184,6 +184,12 @@ proceed
 - [x] [I114] Add audio_to_text CLI with --input-audio/--input-text to produce forced-alignment SRT output. Resolved with uv CLI support, forced-alignment SRT emission, and integration tests.
 - [ ] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download.
 - [x] [I115] Add a web UI to audio_to_text with audio/text dropzones, background job runner, and SRT download. Resolved with built-in UI server, background queue, and SRT download endpoint plus docs.
+- [ ] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status.
+- [x] [I116] Add alignment progress reporting to the audio_to_text UI so users can see generation status. Resolved with progress updates in job tracking and UI progress bar rendering.
+- [ ] [I117] Restrict audio_to_text language selection to supported alignment languages (dropdown only), remove custom model input, and avoid auto-detect.
+- [x] [I117] Restrict audio_to_text language selection to supported alignment languages (dropdown only), remove custom model input, and avoid auto-detect. Resolved with CLI/UI language validation, dropdown options, and docs/tests updates.
+- [ ] [I118] Add Linux-based Docker packaging for audio_to_text with dev/prod workflows and shared env file.
+- [x] [I118] Add Linux-based Docker packaging for audio_to_text with dev/prod workflows and shared env file. Resolved with multi-stage Dockerfiles, compose samples, and env example/docs.
 
 ## Tooling Baseline (I114)
 - `make test` failed before changes because `audio_to_text.py` is not executable and lacks the new CLI interface (PermissionError).
@@ -192,3 +198,48 @@ proceed
 
 - [ ] [B324] Fix render_text_video RSVP windows that are shorter than one frame to avoid "subtitle window has no frames" errors.
 - [x] [B324] Fix render_text_video RSVP windows that are shorter than one frame to avoid "subtitle window has no frames" errors. Resolved with non-empty window frame conversion and RSVP integration coverage.
+- [ ] [B321] Fix audio_to_text UI template placeholder escaping to avoid KeyError for jobId.
+- [x] [B321] Fix audio_to_text UI template placeholder escaping to avoid KeyError for jobId. Resolved with escaped template literals.
+- [ ] [B322] Prevent audio_to_text UI DeprecationWarning noise from cgi and guard alignment against unsupported torch versions with a clear error.
+- [x] [B322] Prevent audio_to_text UI DeprecationWarning noise from cgi and guard alignment against unsupported torch versions with a clear error. Resolved with cgi import warning suppression, torch version guard, and docs update.
+- [ ] [B323] Fix audio_to_text HF alignment model load failures on Intel macOS by using safetensors-backed defaults (Russian) and conditional torch version checks.
+- [x] [B323] Fix audio_to_text HF alignment model load failures on Intel macOS by using safetensors-backed defaults (Russian) and conditional torch version checks. Resolved with RU safetensors override, conditional torch>=2.6 enforcement, and docs update.
+- [ ] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import.
+- [x] [B325] Fix audio_to_text Docker build failure caused by torchaudio missing AudioMetaData during whisperx import. Resolved with lazy whisperx import and torchaudio AudioMetaData patching.
+- [ ] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text.
+- [x] [B326] Add fallback AudioMetaData to avoid torchaudio import failures in audio_to_text. Resolved with a fallback NamedTuple and warning log.
+- [ ] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions.
+- [x] [B327] Remove torchaudio AudioMetaData fallback and enforce strict dependency versions. Resolved with strict dependency pins and hard failure when AudioMetaData is missing.
+- [ ] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads.
+- [x] [B328] Suppress cgi DeprecationWarning emitted with stacklevel during UI uploads. Resolved with warning filtering by message.
+- [ ] [B329] Remove deprecated cgi usage in audio_to_text UI uploads and replace with a non-deprecated multipart parser.
+- [x] [B329] Remove deprecated cgi usage in audio_to_text UI uploads and replace with a non-deprecated multipart parser. Resolved with email-based multipart parsing and strict field validation.
+
+## Improvements Addendum (200–299)
+
+- [x] [I119] Restrict audio_to_text to a Linux-only Docker runtime, persist UI uploads under data/, and document container testing. Resolved with a Linux guardrail, data volume mapping, and README updates.
+- [x] [I124] Allow deleting completed audio_to_text UI jobs. Resolved with a trash icon action, DELETE endpoint, persisted job store removal, and integration coverage for the API.
+- [x] [I125] Allow deleting failed audio_to_text UI jobs. Resolved by widening deletion to finished jobs (completed/failed) and extending integration coverage.
+- [x] [I126] Name audio_to_text SRT downloads after the input audio/video file. Resolved by using the input filename for the stored output path and Content-Disposition header.
+
+## Maintenance Addendum (400–499)
+
+- [x] [M404] Remove docker-compose profiles for audio_to_text now that no published image exists. Resolved with a single compose service and updated README commands.
+- [x] [M405] Remove the Russian alignment model override to rely on whisperx defaults. Resolved by dropping the override map and using whisperx model selection.
+- [x] [M406] Bind-mount the Hugging Face cache to host storage for audio_to_text. Resolved by switching /opt/hf-cache to data/hf-cache and documenting the cache path.
+
+## BugFixes Addendum (300–399)
+
+- [x] [B330] Avoid whisperx import failures from ctranslate2 exec-stack requirements by importing alignment modules directly. Resolved with alignment-only imports that skip transcribe.
+
+## Improvements Addendum (200–299)
+
+- [x] [I120] Replace audio_to_text UI polling with SSE job updates. Resolved with EventSource streaming and a new SSE endpoint.
+- [x] [I121] Add a smoother alignment progress signal for the audio_to_text UI. Resolved with time-based progress updates emitted during alignment.
+- [x] [I122] Stack audio_to_text UI jobs with per-job downloads and embed input metadata in generated SRT files. Resolved with queued job tracking, SSE list updates, and SRT metadata headers.
+- [x] [I123] Remove SRT metadata headers and persist UI job lists for audio_to_text. Resolved with job store persistence and job list streaming without SRT annotations.
+
+## BugFixes Addendum (300–399)
+
+- [x] [B331] Fix audio_to_text alignment failures when whisperx emits punctuation tokens (e.g., em dash) without timestamps. Resolved by merging punctuation into neighboring word cues, capturing Python warnings via logging, and adding integration coverage via `--input-alignment-json`.
+- [x] [B332] Fix audio_to_text alignment failures when whisperx emits non-punctuation tokens without timestamps (e.g. single letters or full words). Resolved by inferring token timings from segment bounds, keeping punctuation-merging behavior, and extending integration coverage via `--input-alignment-json`.
