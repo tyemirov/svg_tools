@@ -39,10 +39,12 @@ from domain.text_video import (
     RenderValidationError,
     SubtitleWindow,
     SRT_TIME_RANGE_PATTERN,
+    SBV_TIME_RANGE_PATTERN,
     parse_subtitle_renderer,
     tokenize_words,
     split_trailing_punctuation,
     parse_srt,
+    parse_sbv,
 )
 from service.render_plan import RenderPlan, build_render_plan, build_rsvp_render_plan
 
@@ -110,6 +112,13 @@ class VideoAlphaMode(str, Enum):
     OPAQUE = "opaque"
 
 
+class SubtitleFormat(str, Enum):
+    """Supported subtitle input formats."""
+
+    SRT = "srt"
+    SBV = "sbv"
+
+
 @dataclass(frozen=True)
 class WordStyle:
     """Style definition for a single word."""
@@ -165,7 +174,8 @@ class RenderRequest:
     alpha_mode: VideoAlphaMode
     audio_track: str | None
     duration_override: bool
-    input_text: str
+    input_text: str | None
+    subtitle_format: SubtitleFormat | None
 
 
 @dataclass(frozen=True)
@@ -241,22 +251,42 @@ def read_utf8_text_strict(file_path: str) -> str:
         ) from exc
 
 
-def is_srt_input(file_path: str, text_value: str) -> bool:
-    """Return True when input should be treated as SRT."""
-    if file_path.lower().endswith(".srt"):
-        return True
-    return any(
+SUBTITLE_PARSERS = {
+    SubtitleFormat.SRT: parse_srt,
+    SubtitleFormat.SBV: parse_sbv,
+}
+
+
+def detect_subtitle_format(
+    file_path: str, text_value: str
+) -> SubtitleFormat | None:
+    """Detect subtitle format based on extension or content."""
+    lowered = file_path.lower()
+    if lowered.endswith(".srt"):
+        return SubtitleFormat.SRT
+    if lowered.endswith(".sbv"):
+        return SubtitleFormat.SBV
+    if any(
         SRT_TIME_RANGE_PATTERN.fullmatch(line.strip())
         for line in text_value.splitlines()
         if line.strip()
-    )
+    ):
+        return SubtitleFormat.SRT
+    if any(
+        SBV_TIME_RANGE_PATTERN.fullmatch(line.strip())
+        for line in text_value.splitlines()
+        if line.strip()
+    ):
+        return SubtitleFormat.SBV
+    return None
 
 
-def compute_srt_duration_seconds(
-    text_value: str, remove_punctuation: bool
+def compute_subtitle_duration_seconds(
+    text_value: str, remove_punctuation: bool, subtitle_format: SubtitleFormat
 ) -> float:
-    """Compute the maximum end time for SRT content."""
-    windows = parse_srt(text_value, remove_punctuation)
+    """Compute the maximum end time for subtitle content."""
+    parser = SUBTITLE_PARSERS[subtitle_format]
+    windows = parser(text_value, remove_punctuation)
     return max(window.end_seconds for window in windows)
 
 
@@ -1134,20 +1164,21 @@ def build_subtitle_windows(
     text_value: str,
     remove_punctuation: bool,
     subtitle_renderer: SubtitleRenderer,
+    subtitle_format: SubtitleFormat | None,
 ) -> Tuple[SubtitleWindow, ...]:
-    """Build subtitle windows from plain text or SRT input."""
-    is_srt = is_srt_input(config.input_text_file, text_value)
-
+    """Build subtitle windows from plain text or subtitle input."""
     if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
-        if not is_srt:
+        if subtitle_format is None:
             raise RenderValidationError(
                 INVALID_CONFIG_CODE,
-                "rsvp_orp requires SRT input",
+                "rsvp_orp requires SRT or SBV input",
             )
-        return parse_srt(text_value, remove_punctuation)
+        parser = SUBTITLE_PARSERS[subtitle_format]
+        return parser(text_value, remove_punctuation)
 
-    if is_srt:
-        return parse_srt(text_value, remove_punctuation)
+    if subtitle_format is not None:
+        parser = SUBTITLE_PARSERS[subtitle_format]
+        return parser(text_value, remove_punctuation)
 
     words = tokenize_words(text_value, remove_punctuation)
     return (
@@ -1181,11 +1212,19 @@ def trim_subtitle_windows(
 
 
 def build_render_plan_from_input(
-    config: RenderConfig, remove_punctuation: bool, input_text: str, duration_override: bool
+    config: RenderConfig,
+    remove_punctuation: bool,
+    input_text: str,
+    duration_override: bool,
+    subtitle_format: SubtitleFormat | None,
 ) -> RenderPlan:
     """Load input text and build a render plan."""
     windows = build_subtitle_windows(
-        config, input_text, remove_punctuation, config.subtitle_renderer
+        config,
+        input_text,
+        remove_punctuation,
+        config.subtitle_renderer,
+        subtitle_format,
     )
     if duration_override:
         windows = trim_subtitle_windows(windows, config.duration_seconds)
@@ -1237,6 +1276,64 @@ def emit_directions(
         "letter_band_sizes": [list(sizes) for sizes in letter_band_sizes],
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
+
+
+def compute_total_frames(duration_seconds: float, fps: int) -> int:
+    """Compute total frames for a video duration."""
+    total_frames = int(round(duration_seconds * fps))
+    if total_frames <= 0:
+        raise RenderValidationError(
+            INVALID_CONFIG_CODE, "duration and fps produce zero frames"
+        )
+    return total_frames
+
+
+def render_background_video(
+    config: RenderConfig,
+    background_image: Image.Image | None,
+    alpha_mode: VideoAlphaMode,
+    audio_track: str | None,
+) -> None:
+    """Render a background-only video for the configured duration."""
+    ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
+    if not ffmpeg_process.stdin:
+        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
+
+    total_frames = compute_total_frames(config.duration_seconds, config.fps)
+    if background_image is None:
+        frame_image = Image.new(
+            "RGBA", (config.width, config.height), color=config.background_rgba
+        )
+    else:
+        frame_image = background_image
+    frame_bytes = frame_image.tobytes()
+
+    try:
+        for _ in range(total_frames):
+            ffmpeg_process.stdin.write(frame_bytes)
+
+        ffmpeg_process.stdin.close()
+        stderr_bytes = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else b""
+        return_code = ffmpeg_process.wait()
+
+        if return_code != 0:
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE,
+                f"ffmpeg failed with exit code {return_code}. {stderr_text}",
+            )
+
+    finally:
+        try:
+            if ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
+                ffmpeg_process.stdin.close()
+        except Exception:
+            pass
+        try:
+            if ffmpeg_process.poll() is None:
+                ffmpeg_process.kill()
+        except Exception:
+            pass
 
 
 def render_video(
@@ -1463,7 +1560,7 @@ def render_rsvp_video(
 def parse_args(argv: Sequence[str]) -> RenderRequest:
     """Parse CLI arguments into a RenderRequest."""
     parser = argparse.ArgumentParser(prog="render_text_video.py", add_help=True)
-    parser.add_argument("--input-text-file", required=True)
+    parser.add_argument("--input-text-file", required=False)
     parser.add_argument("--output-video-file", default="video.mov")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
@@ -1489,15 +1586,39 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     remove_punctuation = not parsed.keep_punctuation
     background_rgba = parse_hex_color_to_rgba(parsed.background)
     background_image = None
-    input_text = read_utf8_text_strict(parsed.input_text_file)
-    is_srt = is_srt_input(parsed.input_text_file, input_text)
-    srt_duration = (
-        compute_srt_duration_seconds(input_text, remove_punctuation) if is_srt else None
-    )
+    input_text_file = parsed.input_text_file
+    input_text = None
+    subtitle_format = None
+    subtitle_duration = None
+    if input_text_file is not None:
+        input_text = read_utf8_text_strict(input_text_file)
+        subtitle_format = detect_subtitle_format(input_text_file, input_text)
+        if subtitle_format is not None:
+            subtitle_duration = compute_subtitle_duration_seconds(
+                input_text, remove_punctuation, subtitle_format
+            )
     audio_track = parsed.audio_track
     audio_duration = (
         get_audio_duration_seconds(audio_track) if audio_track else None
     )
+
+    if input_text_file is None:
+        if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "rsvp_orp requires input-text-file"
+            )
+        if parsed.emit_directions:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "emit-directions requires input-text-file"
+            )
+        if parsed.direction_seed is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "direction-seed requires input-text-file"
+            )
+        if parsed.font_min is not None or parsed.font_max is not None:
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "font-min/font-max require input-text-file"
+            )
 
     if subtitle_renderer == SubtitleRenderer.RSVP_ORP:
         if parsed.direction_seed is not None:
@@ -1540,15 +1661,15 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     duration_override = parsed.duration_seconds is not None
     if duration_override:
         duration_seconds = parsed.duration_seconds
-        if audio_track or srt_duration is not None:
+        if audio_track or subtitle_duration is not None:
             LOGGER.warning(
                 "render_text_video.input.duration_override: using duration-seconds; "
                 "audio will be trimmed or padded when supplied"
             )
     else:
         duration_candidates = []
-        if srt_duration is not None:
-            duration_candidates.append(srt_duration)
+        if subtitle_duration is not None:
+            duration_candidates.append(subtitle_duration)
         if audio_duration is not None:
             duration_candidates.append(audio_duration)
         if not duration_candidates:
@@ -1580,7 +1701,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         )
 
     config = RenderConfig(
-        input_text_file=parsed.input_text_file,
+        input_text_file=input_text_file,
         output_video_file=parsed.output_video_file,
         width=width,
         height=height,
@@ -1604,6 +1725,7 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
         audio_track=audio_track,
         duration_override=duration_override,
         input_text=input_text,
+        subtitle_format=subtitle_format,
     )
 
 
@@ -1683,11 +1805,21 @@ def main() -> int:
 
     try:
         request = parse_args(sys.argv[1:])
+        if request.input_text is None:
+            validate_ffmpeg_capabilities(request.alpha_mode, request.audio_track)
+            render_background_video(
+                request.config,
+                request.background_image,
+                request.alpha_mode,
+                request.audio_track,
+            )
+            return 0
         plan = build_render_plan_from_input(
             request.config,
             request.remove_punctuation,
             request.input_text,
             request.duration_override,
+            request.subtitle_format,
         )
         if request.config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
             tokens = build_rsvp_tokens(plan.words, request.config)

@@ -22,7 +22,7 @@ using inline PEP 723 metadata.
 - `image_to_data_uri.py`: crops and resizes a raster image, then emits a PNG data URI.
 - `image_to_silhouette.py`: extracts a filled silhouette mask from a raster image.
 - `image_to_svg.py`: converts raster images to SVG via contour tracing or flat color regions.
-- `render_text_video.py`: renders animated word-by-word text into a MOV (ProRes for alpha, H.264 for opaque), with optional audio track muxing.
+- `render_text_video.py`: renders animated word-by-word text into a MOV (ProRes for alpha, H.264 for opaque), with optional audio track muxing and a background-only mode when no text input is supplied.
 - `text_to_svg.py`: converts text into a single-path SVG using a font file.
 - `to_favicons.py`: generates a favicon package and HTML head snippet from a source SVG.
 

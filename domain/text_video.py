@@ -11,6 +11,7 @@ from typing import Tuple
 INVALID_COLOR_CODE = "render_text_video.input.invalid_color"
 INVALID_CONFIG_CODE = "render_text_video.input.invalid_config"
 INVALID_SRT_CODE = "render_text_video.input.invalid_srt"
+INVALID_SBV_CODE = "render_text_video.input.invalid_sbv"
 INVALID_WINDOW_CODE = "render_text_video.input.invalid_window"
 EMPTY_TEXT_CODE = "render_text_video.input.empty_text"
 INPUT_FILE_CODE = "render_text_video.input.file_error"
@@ -24,6 +25,12 @@ SRT_TIME_RANGE_PATTERN = re.compile(
     r"^(?P<start>\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2},\d{3})$"
 )
 SRT_TIMECODE_PATTERN = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})$")
+SBV_TIMECODE_PATTERN = re.compile(
+    r"^(?P<hours>\d+):(?P<minutes>\d{2}):(?P<seconds>\d{2})\.(?P<fraction>\d{1,3})$"
+)
+SBV_TIME_RANGE_PATTERN = re.compile(
+    r"^(?P<start>\d+:\d{2}:\d{2}\.\d{1,3})\s*,\s*(?P<end>\d+:\d{2}:\d{2}\.\d{1,3})$"
+)
 TRAILING_PUNCTUATION = ".,!?:;"
 
 
@@ -47,7 +54,7 @@ class SubtitleRenderer(str, Enum):
 class RenderConfig:
     """Validated configuration for render_text_video."""
 
-    input_text_file: str
+    input_text_file: str | None
     output_video_file: str
     width: int
     height: int
@@ -61,6 +68,10 @@ class RenderConfig:
     font_size_max: int
 
     def __post_init__(self) -> None:
+        if self.input_text_file is not None and not self.input_text_file.strip():
+            raise RenderValidationError(
+                INVALID_CONFIG_CODE, "input_text_file must be non-empty"
+            )
         if self.width <= 0 or self.height <= 0:
             raise RenderValidationError(
                 INVALID_CONFIG_CODE, "width and height must be positive"
@@ -174,6 +185,24 @@ def parse_timecode(timecode_value: str) -> float:
     return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
 
 
+def parse_sbv_timecode(timecode_value: str) -> float:
+    """Parse an SBV timecode into seconds."""
+    normalized = timecode_value.strip()
+    if not SBV_TIMECODE_PATTERN.fullmatch(normalized):
+        raise RenderValidationError(
+            INVALID_SBV_CODE, f"invalid timecode: {timecode_value!r}"
+        )
+    hours_text, minutes_text, seconds_fraction = normalized.split(":", 2)
+    seconds_text, fraction_text = seconds_fraction.split(".", 1)
+    hours: int = int(hours_text)
+    minutes: int = int(minutes_text)
+    seconds: int = int(seconds_text)
+    fraction_value: int = int(fraction_text)
+    scale: int = 10 ** (3 - len(fraction_text))
+    millis: int = fraction_value * scale
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+
+
 def parse_subtitle_renderer(value: str) -> SubtitleRenderer:
     """Parse a subtitle renderer name into a SubtitleRenderer."""
     normalized = value.strip().lower()
@@ -225,5 +254,45 @@ def parse_srt(text_value: str, remove_punctuation: bool) -> Tuple[SubtitleWindow
 
     if not windows:
         raise RenderValidationError(EMPTY_TEXT_CODE, "SRT contains no subtitles")
+
+    return tuple(windows)
+
+
+def parse_sbv(text_value: str, remove_punctuation: bool) -> Tuple[SubtitleWindow, ...]:
+    """Parse SBV content into subtitle windows."""
+    normalized = text_value.replace("\ufeff", "").strip()
+    if not normalized:
+        raise RenderValidationError(EMPTY_TEXT_CODE, "SBV input is empty")
+
+    blocks = re.split(r"\n\s*\n", normalized)
+    windows: list[SubtitleWindow] = []
+
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+
+        time_line = lines[0]
+        match = SBV_TIME_RANGE_PATTERN.fullmatch(time_line)
+        if not match:
+            raise RenderValidationError(
+                INVALID_SBV_CODE, f"invalid time range: {time_line!r}"
+            )
+
+        start_seconds = parse_sbv_timecode(match.group("start"))
+        end_seconds = parse_sbv_timecode(match.group("end"))
+        subtitle_lines = lines[1:]
+        if not subtitle_lines:
+            raise RenderValidationError(INVALID_SBV_CODE, "SBV block missing text")
+
+        words = tokenize_words(" ".join(subtitle_lines), remove_punctuation)
+        windows.append(
+            SubtitleWindow(
+                start_seconds=start_seconds, end_seconds=end_seconds, words=words
+            )
+        )
+
+    if not windows:
+        raise RenderValidationError(EMPTY_TEXT_CODE, "SBV contains no subtitles")
 
     return tuple(windows)
