@@ -250,6 +250,57 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 
 ---
 
+### `audio_to_text.py`
+
+Force-align audio or video to a provided transcript and emit an SRT with word-level timing.
+
+**CLI usage:**
+
+```shell
+./audio_to_text.py \
+    --input-audio <PATH> \
+    --input-text <PATH> \
+    [--output-srt <PATH.srt>] \
+    [--language <CODE>]
+```
+
+**UI usage:**
+
+```shell
+./audio_to_text.py --ui [--ui-host <HOST>] [--ui-port <PORT>]
+```
+
+The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
+audio_to_text is supported on Linux only; on macOS or Windows, run it via Docker.
+Uploads are stored under `data/audio_to_text_uploads` and persisted via the `data/` bind mount in the Docker compose files.
+Model downloads are cached under `data/hf-cache` on the host.
+Torch/torchaudio checkpoints (e.g. wav2vec2 ASR weights) are cached under `data/torch-cache` on the host.
+
+**Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
+**Runtime requirements:** torch >= 2.6 and torchaudio >= 2.6 (pinned for Linux) for AudioMetaData support and Hugging Face `.bin` models.
+
+**Docker (Linux)**
+
+Create the shared env file:
+
+```shell
+cp .env.audio_to_text.example .env.audio_to_text
+```
+
+Development (bind-mounts the repo for local changes):
+
+```shell
+docker compose -f docker/audio_to_text/docker-compose.yml up --build
+```
+
+Tests (Linux container):
+
+```shell
+docker compose -f docker/audio_to_text/docker-compose.yml run --rm --entrypoint make audio_to_text test
+```
+
+---
+
 ### `text_to_svg.py`
 
 Render any text into a valid single-path SVG file.
