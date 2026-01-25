@@ -261,3 +261,5 @@ proceed
 - [x] [I133] Raise CI coverage gate to 100% by expanding integration coverage for audio_to_text, audio_to_text_backend, and render_text_video. Resolved with expanded integration coverage, refreshed TLS fixtures, and a 100% coverage gate in `make ci`.
 - [ ] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits.
 - [x] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits. Resolved by marking gRPC/backend scripts executable for volume-mounted dev runs.
+- [ ] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`.
+- [x] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`. Resolved by removing empty TLS entries from the example env file.
