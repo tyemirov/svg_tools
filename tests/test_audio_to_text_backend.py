@@ -209,6 +209,103 @@ def build_multipart(
     return b"".join(parts), boundary
 
 
+def build_job_store_payload(job_id: str) -> dict[str, object]:
+    """Build a persisted job store payload for tests."""
+    job_root = f"/tmp/{job_id}"
+    return {
+        "change_id": 1,
+        "job_order": [job_id],
+        "jobs": {
+            job_id: {
+                "job_id": job_id,
+                "created_at": 1.0,
+                "input": {
+                    "audio_filename": "audio.wav",
+                    "text_filename": "text.txt",
+                    "language": "en",
+                    "remove_punctuation": True,
+                    "audio_path": f"{job_root}/upload.wav",
+                    "text_path": f"{job_root}/text.txt",
+                    "output_path": f"{job_root}/audio.srt",
+                },
+                "result": {
+                    "status": "queued",
+                    "message": "Queued",
+                    "output_srt": None,
+                    "progress": 0.0,
+                    "started_at": None,
+                    "completed_at": None,
+                },
+            }
+        },
+    }
+
+
+def build_raw_multipart(boundary: str, parts: Iterable[bytes]) -> bytes:
+    """Build a raw multipart/form-data payload."""
+    boundary_bytes = f"--{boundary}\r\n".encode("utf-8")
+    closing_bytes = f"--{boundary}--\r\n".encode("utf-8")
+    payload_parts = [boundary_bytes + part + b"\r\n" for part in parts]
+    payload_parts.append(closing_bytes)
+    return b"".join(payload_parts)
+
+
+def multipart_field(
+    name: str,
+    value: str,
+    extra_headers: Iterable[str] | None = None,
+) -> bytes:
+    """Build a multipart field part."""
+    header_lines = [f'Content-Disposition: form-data; name="{name}"']
+    if extra_headers:
+        header_lines.extend(extra_headers)
+    header = "\r\n".join(header_lines) + "\r\n\r\n"
+    return header.encode("utf-8") + value.encode("utf-8")
+
+
+def multipart_field_bytes(
+    name: str,
+    payload: bytes,
+    extra_headers: Iterable[str] | None = None,
+) -> bytes:
+    """Build a multipart field part with raw bytes."""
+    header_lines = [f'Content-Disposition: form-data; name="{name}"']
+    if extra_headers:
+        header_lines.extend(extra_headers)
+    header = "\r\n".join(header_lines) + "\r\n\r\n"
+    return header.encode("utf-8") + payload
+
+
+def multipart_file(
+    name: str,
+    filename: str,
+    content_type: str,
+    payload: bytes,
+) -> bytes:
+    """Build a multipart file part."""
+    header = (
+        f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    )
+    return header.encode("utf-8") + payload
+
+
+def send_json_post(
+    host: str,
+    port: int,
+    path: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> tuple[int, dict[str, object]]:
+    """Send an HTTP POST and decode the JSON response."""
+    connection = http.client.HTTPConnection(host, port, timeout=4)
+    connection.request("POST", path, body=body, headers=headers)
+    response = connection.getresponse()
+    payload = json.loads(response.read().decode("utf-8"))
+    connection.close()
+    return response.status, payload
+
+
 def write_stub_ffmpeg(script_path: Path, stderr_text: str) -> None:
     """Write a stub ffmpeg executable that exits with an error."""
     script_path.write_text(
@@ -358,6 +455,49 @@ def test_audio_to_text_backend_job_flow(tmp_path: Path) -> None:
         stop_process(grpc_process)
 
 
+def test_audio_to_text_backend_accepts_remove_punctuation_false(
+    tmp_path: Path,
+) -> None:
+    """Accept uploads that keep punctuation."""
+    repo_root = Path(__file__).resolve().parents[1]
+    grpc_port = free_local_port()
+    backend_port = free_local_port()
+    grpc_process = start_grpc_server(repo_root, grpc_port)
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        tmp_path / "backend-data",
+        f"127.0.0.1:{grpc_port}",
+    )
+    try:
+        wait_for_port("127.0.0.1", grpc_port, timeout_seconds=5)
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        base_url = f"http://127.0.0.1:{backend_port}"
+        wav_bytes = build_wav_bytes(0.2)
+        payload, boundary = build_multipart(
+            {"language": "en", "remove_punctuation": "0"},
+            [
+                ("audio", "sample.wav", "audio/wav", wav_bytes),
+                ("text", "sample.txt", "text/plain", b"Hello, world"),
+            ],
+        )
+        request = Request(
+            f"{base_url}/api/jobs",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload)),
+            },
+        )
+        with urlopen(request, timeout=5) as response:
+            created = json.loads(response.read().decode("utf-8"))
+        assert created.get("remove_punctuation") is False
+    finally:
+        stop_process(backend_process)
+        stop_process(grpc_process)
+
+
 def test_audio_to_text_backend_extracts_non_wav_upload(tmp_path: Path) -> None:
     """Extract WAV when the upload is not already a WAV."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -402,6 +542,56 @@ def test_audio_to_text_backend_extracts_non_wav_upload(tmp_path: Path) -> None:
         with urlopen(f"{base_url}/api/jobs/{job_id}/srt", timeout=5) as response:
             srt_payload = response.read().decode("utf-8")
         assert "Hello" in srt_payload
+    finally:
+        stop_process(backend_process)
+        stop_process(grpc_process)
+
+
+def test_audio_to_text_backend_defaults_srt_filename_when_empty(
+    tmp_path: Path,
+) -> None:
+    """Default SRT filename when the audio name is empty."""
+    repo_root = Path(__file__).resolve().parents[1]
+    grpc_port = free_local_port()
+    backend_port = free_local_port()
+    grpc_process = start_grpc_server(repo_root, grpc_port)
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        tmp_path / "backend-data",
+        f"127.0.0.1:{grpc_port}",
+    )
+    try:
+        wait_for_port("127.0.0.1", grpc_port, timeout_seconds=5)
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        base_url = f"http://127.0.0.1:{backend_port}"
+        wav_bytes = build_wav_bytes(0.2)
+        payload, boundary = build_multipart(
+            {"language": "en", "remove_punctuation": "1"},
+            [
+                ("audio", "/", "audio/wav", wav_bytes),
+                ("text", "sample.txt", "text/plain", b"Hello world"),
+            ],
+        )
+        request = Request(
+            f"{base_url}/api/jobs",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload)),
+            },
+        )
+        with urlopen(request, timeout=5) as response:
+            created = json.loads(response.read().decode("utf-8"))
+        job_id = created.get("job_id")
+        assert isinstance(job_id, str)
+        wait_for_job_completion(base_url, job_id)
+        with urlopen(
+            f"{base_url}/api/jobs/{job_id}/srt", timeout=5
+        ) as response:
+            header = response.getheader("Content-Disposition", "")
+        assert "filename=\"alignment.srt\"" in header
     finally:
         stop_process(backend_process)
         stop_process(grpc_process)
@@ -520,6 +710,302 @@ def test_audio_to_text_backend_upload_too_large(tmp_path: Path) -> None:
     finally:
         stop_process(backend_process)
         stop_process(grpc_process)
+
+
+def test_audio_to_text_backend_rejects_invalid_upload_headers(
+    tmp_path: Path,
+) -> None:
+    """Reject malformed upload headers."""
+    repo_root = Path(__file__).resolve().parents[1]
+    backend_port = free_local_port()
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        tmp_path / "backend-data",
+        "127.0.0.1:59999",
+    )
+    try:
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        cases = [
+            ({"Content-Length": "1"}, b"x", "Content-Type header is required"),
+            (
+                {"Content-Type": "application/json", "Content-Length": "1"},
+                b"x",
+                "expected multipart form data",
+            ),
+            (
+                {"Content-Type": "multipart/form-data", "Content-Length": "1"},
+                b"x",
+                "multipart boundary is required",
+            ),
+            (
+                {
+                    "Content-Type": "multipart/form-data; boundary=stub",
+                    "Content-Length": "0",
+                },
+                b"",
+                "Content-Length must be positive",
+            ),
+            (
+                {
+                    "Content-Type": "multipart/form-data; boundary=stub",
+                    "Content-Length": "nope",
+                },
+                b"x",
+                "Content-Length must be an integer",
+            ),
+        ]
+        for headers, body, expected in cases:
+            status, payload = send_json_post(
+                "127.0.0.1", backend_port, "/api/jobs", headers, body
+            )
+            assert status == 400
+            assert expected in payload.get("error", "")
+        connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=4)
+        connection.putrequest("POST", "/api/jobs")
+        connection.putheader("Content-Type", "multipart/form-data; boundary=stub")
+        connection.endheaders()
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        assert response.status == 400
+        assert "Content-Length header is required" in payload.get("error", "")
+    finally:
+        stop_process(backend_process)
+
+
+def test_audio_to_text_backend_rejects_incomplete_body(tmp_path: Path) -> None:
+    """Reject uploads with incomplete request bodies."""
+    repo_root = Path(__file__).resolve().parents[1]
+    backend_port = free_local_port()
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        tmp_path / "backend-data",
+        "127.0.0.1:59999",
+    )
+    try:
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        with socket.create_connection(("127.0.0.1", backend_port), timeout=3) as sock:
+            request = (
+                "POST /api/jobs HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Type: multipart/form-data; boundary=stub\r\n"
+                "Content-Length: 10\r\n"
+                "\r\n"
+                "abc"
+            ).encode("utf-8")
+            sock.sendall(request)
+            sock.shutdown(socket.SHUT_WR)
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        assert b"request body is incomplete" in response
+    finally:
+        stop_process(backend_process)
+
+
+def test_audio_to_text_backend_rejects_invalid_upload_payloads(
+    tmp_path: Path,
+) -> None:
+    """Reject malformed multipart payloads."""
+    repo_root = Path(__file__).resolve().parents[1]
+    backend_port = free_local_port()
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        tmp_path / "backend-data",
+        "127.0.0.1:59999",
+    )
+    try:
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        boundary = "raw-boundary"
+        audio_part = multipart_file("audio", "sample.wav", "audio/wav", b"RIFF")
+        text_part = multipart_file("text", "sample.txt", "text/plain", b"Hello")
+
+        def send_body(body: bytes) -> str:
+            """Send a raw multipart body and return the error message."""
+            status, payload = send_json_post(
+                "127.0.0.1",
+                backend_port,
+                "/api/jobs",
+                {
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(len(body)),
+                },
+                body,
+            )
+            assert status == 400
+            return str(payload.get("error", ""))
+
+        cases = [
+            (b"not-a-multipart", "multipart parse failed"),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("device", "cpu"),
+                        multipart_field("language", "en"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "unexpected form field: device",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "en"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "missing form field: remove_punctuation",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "en"),
+                        multipart_field("remove_punctuation", "maybe"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "remove_punctuation must be a boolean",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "en"),
+                        multipart_field("remove_punctuation", "1"),
+                        text_part,
+                    ],
+                ),
+                "missing upload field: audio",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "en"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                    ],
+                ),
+                "missing upload field: text",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "en"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "duplicate upload field: audio",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "en"),
+                        multipart_field("language", "ru"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "duplicate form field: language",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "missing form field: language",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", " "),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "language must be provided",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("language", "xx"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "unsupported language",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        b'Content-Disposition: form-data; filename="sample.wav"\r\n'
+                        b"Content-Type: audio/wav\r\n\r\nRIFF",
+                    ],
+                ),
+                "multipart field name is required",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field(
+                            "language",
+                            "en",
+                            ["Content-Type: text/plain; charset=iso-8859-1"],
+                        ),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "unsupported charset",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field_bytes("language", b"\xff"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "invalid UTF-8",
+            ),
+        ]
+        for body, expected in cases:
+            error = send_body(body)
+            assert expected in error
+    finally:
+        stop_process(backend_process)
 
 
 def test_audio_to_text_backend_job_not_ready(tmp_path: Path) -> None:
@@ -986,6 +1472,91 @@ def test_audio_to_text_backend_delete_paths(tmp_path: Path) -> None:
         stop_process(grpc_process)
 
 
+def test_audio_to_text_backend_delete_job_artifacts_failure(
+    tmp_path: Path,
+) -> None:
+    """Reject deletes when job artifacts cannot be removed."""
+    repo_root = Path(__file__).resolve().parents[1]
+    backend_port = free_local_port()
+    data_dir = tmp_path / "backend-data"
+    job_id = "job-1"
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"] = {
+        "status": "completed",
+        "message": "Done",
+        "output_srt": "/tmp/output.srt",
+        "progress": 1.0,
+        "started_at": 1.0,
+        "completed_at": 2.0,
+    }
+    data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.joinpath("jobs.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    data_dir.joinpath(job_id).write_text("blocked", encoding="utf-8")
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        data_dir,
+        "127.0.0.1:59999",
+    )
+    try:
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        delete_request = Request(
+            f"http://127.0.0.1:{backend_port}/api/jobs/{job_id}",
+            method="DELETE",
+        )
+        try:
+            with urlopen(delete_request, timeout=3):
+                raise AssertionError("delete should fail")
+        except HTTPError as exc:
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert exc.code == 400
+            assert "job artifacts delete failed" in payload.get("error", "")
+    finally:
+        stop_process(backend_process)
+
+
+def test_audio_to_text_backend_delete_missing_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Delete jobs even when artifacts are already missing."""
+    repo_root = Path(__file__).resolve().parents[1]
+    backend_port = free_local_port()
+    data_dir = tmp_path / "backend-data"
+    job_id = "job-1"
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"] = {
+        "status": "completed",
+        "message": "Done",
+        "output_srt": "/tmp/output.srt",
+        "progress": 1.0,
+        "started_at": 1.0,
+        "completed_at": 2.0,
+    }
+    data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.joinpath("jobs.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        data_dir,
+        "127.0.0.1:59999",
+    )
+    try:
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        delete_request = Request(
+            f"http://127.0.0.1:{backend_port}/api/jobs/{job_id}",
+            method="DELETE",
+        )
+        with urlopen(delete_request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            assert payload.get("job_id") == job_id
+    finally:
+        stop_process(backend_process)
+
+
 def test_audio_to_text_backend_rejects_duplicate_job_id(tmp_path: Path) -> None:
     """Return an error when a job id already exists."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -1058,6 +1629,50 @@ def test_audio_to_text_backend_rejects_duplicate_job_id(tmp_path: Path) -> None:
             payload = json.loads(exc.read().decode("utf-8"))
             assert exc.code == 500
             assert "job already exists" in payload.get("error", "")
+    finally:
+        stop_process(backend_process)
+
+
+def test_audio_to_text_backend_job_store_write_failure(
+    tmp_path: Path,
+) -> None:
+    """Return an error when job store persistence fails."""
+    repo_root = Path(__file__).resolve().parents[1]
+    data_dir = tmp_path / "backend-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "jobs.tmp").mkdir(parents=True, exist_ok=True)
+    backend_port = free_local_port()
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        data_dir,
+        "127.0.0.1:59999",
+    )
+    try:
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        payload, boundary = build_multipart(
+            {"language": "en", "remove_punctuation": "1"},
+            [
+                ("audio", "sample.wav", "audio/wav", b"RIFF"),
+                ("text", "sample.txt", "text/plain", b"Hello"),
+            ],
+        )
+        request = Request(
+            f"http://127.0.0.1:{backend_port}/api/jobs",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload)),
+            },
+        )
+        try:
+            with urlopen(request, timeout=5):
+                raise AssertionError("request should fail")
+        except HTTPError as exc:
+            payload = json.loads(exc.read().decode("utf-8"))
+            assert exc.code == 500
+            assert "job store write failed" in payload.get("error", "")
     finally:
         stop_process(backend_process)
 
@@ -1183,6 +1798,201 @@ def test_audio_to_text_backend_logging_levels(tmp_path: Path) -> None:
             {"AUDIO_TO_TEXT_BACKEND_LOG_LEVEL": level},
         )
         assert result.returncode != 0
+
+
+def test_audio_to_text_backend_rejects_invalid_job_store(
+    tmp_path: Path,
+) -> None:
+    """Reject invalid persisted job store data."""
+    repo_root = Path(__file__).resolve().parents[1]
+    data_dir = tmp_path / "backend-data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "jobs.json").write_text("{", encoding="utf-8")
+    result = run_backend_command(
+        repo_root,
+        [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8081",
+            "--data-dir",
+            str(data_dir),
+            "--grpc-target",
+            "127.0.0.1:1234",
+        ],
+    )
+    assert result.returncode != 0
+    assert "job store load failed" in result.stderr
+
+
+def test_audio_to_text_backend_rejects_invalid_job_store_payloads(
+    tmp_path: Path,
+) -> None:
+    """Reject invalid job store payloads."""
+    repo_root = Path(__file__).resolve().parents[1]
+    job_id = "job-1"
+    cases: list[tuple[str, object]] = []
+
+    cases.append(("job store must be a dictionary", []))
+
+    payload = build_job_store_payload(job_id)
+    payload["job_order"] = "bad"
+    cases.append(("job_order must be a list", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"] = []
+    cases.append(("jobs must be a dictionary", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["change_id"] = "bad"
+    cases.append(("change_id must be an integer", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["change_id"] = -1
+    cases.append(("change_id must be non-negative", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["job_order"] = [123]
+    cases.append(("job ids must be strings", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["job_order"] = ["missing"]
+    payload["jobs"] = {}
+    cases.append(("job missing from store: missing", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"]["extra"] = payload["jobs"][job_id]
+    cases.append(("job store entries are inconsistent", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["job_id"] = "other"
+    cases.append((f"job id mismatch: {job_id}", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["audio_filename"] = 123
+    cases.append(("audio_filename must be a string", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["audio_filename"] = " "
+    cases.append(("audio filename is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["text_filename"] = " "
+    cases.append(("text filename is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["language"] = " "
+    cases.append(("language is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["audio_path"] = " "
+    cases.append(("audio path is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["text_path"] = " "
+    cases.append(("text path is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["output_path"] = " "
+    cases.append(("output path is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["remove_punctuation"] = "yes"
+    cases.append(("remove_punctuation must be a boolean", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["message"] = 123
+    cases.append(("message must be a string", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["started_at"] = "bad"
+    cases.append(("started_at must be a number", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["created_at"] = "bad"
+    cases.append(("created_at must be a number", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["status"] = "unknown"
+    cases.append(("status is invalid: unknown", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["progress"] = 1.5
+    cases.append(("progress must be between 0 and 1", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["started_at"] = -1.0
+    cases.append(("started_at must be non-negative", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["completed_at"] = -1.0
+    cases.append(("completed_at must be non-negative", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["started_at"] = 2.0
+    payload["jobs"][job_id]["result"]["completed_at"] = 1.0
+    cases.append(("completed_at must be after started_at", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["started_at"] = 1.0
+    cases.append(("queued jobs cannot have timestamps", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["status"] = "running"
+    cases.append(
+        ("running jobs must have started_at and no completed_at", payload)
+    )
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["status"] = "completed"
+    payload["jobs"][job_id]["result"]["output_srt"] = "output.srt"
+    cases.append(
+        ("completed jobs must have start and completion times", payload)
+    )
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["status"] = "failed"
+    payload["jobs"][job_id]["result"]["output_srt"] = "output.srt"
+    payload["jobs"][job_id]["result"]["started_at"] = 1.0
+    payload["jobs"][job_id]["result"]["completed_at"] = 2.0
+    payload["jobs"][job_id]["result"]["progress"] = 1.0
+    cases.append(("output path is only valid for completed jobs", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["result"]["status"] = "completed"
+    payload["jobs"][job_id]["result"]["started_at"] = 1.0
+    payload["jobs"][job_id]["result"]["completed_at"] = 2.0
+    payload["jobs"][job_id]["result"]["progress"] = 1.0
+    cases.append(("completed jobs must include output path", payload))
+
+    empty_job_id_payload = build_job_store_payload("")
+    cases.append(("job id is required", empty_job_id_payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["created_at"] = -1.0
+    cases.append(("job created_at must be non-negative", payload))
+
+    for case_index, (expected, payload) in enumerate(cases, start=1):
+        data_dir = tmp_path / f"job-store-{case_index}"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.joinpath("jobs.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        result = run_backend_command(
+            repo_root,
+            [
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8081",
+                "--data-dir",
+                str(data_dir),
+                "--grpc-target",
+                "127.0.0.1:1234",
+            ],
+        )
+        assert result.returncode != 0
+        assert expected in result.stderr
 
 
 def test_audio_to_text_backend_rejects_invalid_config(tmp_path: Path) -> None:

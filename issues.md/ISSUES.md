@@ -267,3 +267,4 @@ proceed
 - [x] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage. Resolved with a unified compose file and updated docs.
 - [ ] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host.
 - [x] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host. Resolved with dynamic backend URL resolution and updated docs/env defaults.
+- [x] [M407] Remove legacy audio_to_text stack artifacts and compatibility flags. Resolved by dropping the legacy docker service/env files, removing compatibility docs, and simplifying the render_text_video punctuation flag to a single keep override.

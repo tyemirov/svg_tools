@@ -213,7 +213,6 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
     [--fonts-dir <PATH>] \
     [--audio-track <PATH>] \
     [--direction-seed <INT>] \
-    [--remove-punctuation] \
     [--keep-punctuation] \
     [--subtitle-renderer <motion|criss_cross|rsvp_orp>] \
     [--font-min <INT>] \
@@ -230,7 +229,6 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
 * Punctuation is stripped by default; use `--keep-punctuation` to preserve punctuation.
-* `--remove-punctuation` is accepted for compatibility but matches the default behavior.
 * RSVP punctuation pauses only apply when punctuation is preserved.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT/SBV input (single word at a time with ORP anchoring).
@@ -301,7 +299,7 @@ cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 
 Development (bind-mounts the repo for local changes):
 
-Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only), `legacy` (single-process UI).
+Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only).
 
 ```shell
 COMPOSE_PROFILES=stack docker compose -f docker/docker-compose.yml up --build
