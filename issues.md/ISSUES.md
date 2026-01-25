@@ -263,3 +263,5 @@ proceed
 - [x] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits. Resolved by marking gRPC/backend scripts executable for volume-mounted dev runs.
 - [ ] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`.
 - [x] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`. Resolved by removing empty TLS entries from the example env file.
+- [ ] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage.
+- [x] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage. Resolved with a unified compose file and updated docs.

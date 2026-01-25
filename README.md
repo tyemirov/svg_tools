@@ -301,8 +301,10 @@ cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 
 Development (bind-mounts the repo for local changes):
 
+Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only), `legacy` (single-process UI).
+
 ```shell
-docker compose -f docker/audio_to_text_stack/docker-compose.yml up --build
+COMPOSE_PROFILES=stack docker compose -f docker/docker-compose.yml up --build
 ```
 
 The gRPC aligner caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` on the host.
@@ -327,7 +329,7 @@ cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 Development (bind-mounts the repo for local changes):
 
 ```shell
-docker compose -f docker/audio_to_text_grpc/docker-compose.yml up --build
+COMPOSE_PROFILES=grpc docker compose -f docker/docker-compose.yml up --build
 ```
 
 The service caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` via bind mounts.

@@ -1,0 +1,67 @@
+services:
+  audio_to_text_ui:
+    profiles:
+      - stack
+    build:
+      context: ..
+      dockerfile: docker/audio_to_text_ui/Dockerfile.dev
+    env_file:
+      - ../.env.audio_to_text_ui
+    ports:
+      - "7860:7860"
+    volumes:
+      - ../audio_to_text_ui:/app/audio_to_text_ui
+    depends_on:
+      - audio_to_text_backend
+
+  audio_to_text_backend:
+    profiles:
+      - stack
+    build:
+      context: ..
+      dockerfile: docker/audio_to_text_backend/Dockerfile.dev
+    env_file:
+      - ../.env.audio_to_text_backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../:/app
+      - ../data:/app/data
+    command: ["--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      - audio_to_text_grpc
+
+  audio_to_text_grpc:
+    profiles:
+      - grpc
+      - stack
+    build:
+      context: ..
+      dockerfile: docker/audio_to_text_grpc/Dockerfile.dev
+    env_file:
+      - ../.env.audio_to_text_grpc
+    ports:
+      - "50051:50051"
+    volumes:
+      - ../:/app
+      - ../data:/app/data
+      - ../data/hf-cache:/opt/hf-cache
+      - ../data/torch-cache:/opt/torch-cache
+    command: ["--host", "0.0.0.0", "--port", "50051"]
+
+  audio_to_text_legacy:
+    profiles:
+      - legacy
+    build:
+      context: ..
+      dockerfile: docker/audio_to_text/Dockerfile.dev
+    env_file:
+      - ../.env.audio_to_text
+    ports:
+      - "7865:7865"
+    volumes:
+      - ../:/app
+      - ../data:/app/data
+      - ../data/hf-cache:/opt/hf-cache
+      - ../data/torch-cache:/opt/torch-cache
+    command: ["--ui", "--ui-host", "0.0.0.0", "--ui-port", "7865"]
