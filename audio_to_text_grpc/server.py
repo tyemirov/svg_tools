@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import dataclasses
 import functools
 import logging
@@ -39,6 +40,7 @@ DEFAULT_ALIGNMENT_TIMEOUT_SECONDS = 300.0
 
 TEST_MODE_ENV = "AUDIO_TO_TEXT_GRPC_TEST_MODE"
 TEST_DELAY_ENV = "AUDIO_TO_TEXT_GRPC_TEST_DELAY_MS"
+TEST_CRASH_ENV = "AUDIO_TO_TEXT_GRPC_TEST_CRASH"
 AUTH_TOKEN_ENV = "AUDIO_TO_TEXT_GRPC_AUTH_TOKEN"
 MAX_AUDIO_BYTES_ENV = "AUDIO_TO_TEXT_GRPC_MAX_AUDIO_BYTES"
 MAX_TRANSCRIPT_CHARS_ENV = "AUDIO_TO_TEXT_GRPC_MAX_TRANSCRIPT_CHARS"
@@ -166,6 +168,7 @@ class ServerConfig:
     auth_token: str | None
     test_mode: bool
     test_delay_seconds: float
+    test_crash: bool
     tls_cert_path: Path | None
     tls_key_path: Path | None
 
@@ -233,6 +236,11 @@ def parse_non_negative_float(raw_value: str, field_name: str) -> float:
     if parsed < 0:
         raise ValueError(f"{field_name} must be non-negative")
     return parsed
+
+
+def parse_bool(raw_value: str) -> bool:
+    """Parse a boolean from a string."""
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def read_env_int(
@@ -362,8 +370,12 @@ def load_config(args: argparse.Namespace, env: dict[str, str]) -> ServerConfig:
     if auth_token is None:
         auth_token = env.get(AUTH_TOKEN_ENV, "").strip() or None
 
+    test_mode = is_test_mode(env)
     test_delay_ms = read_env_float(env, TEST_DELAY_ENV, "test-delay-ms", 0.0) or 0.0
     test_delay_seconds = test_delay_ms / 1000.0
+    test_crash = parse_bool(env.get(TEST_CRASH_ENV, ""))
+    if test_crash and not test_mode:
+        raise ValueError("test-crash requires test mode")
 
     tls_cert_path = resolve_optional_path(
         args.tls_cert or env.get(TLS_CERT_ENV), "tls-cert"
@@ -385,8 +397,9 @@ def load_config(args: argparse.Namespace, env: dict[str, str]) -> ServerConfig:
         max_inflight=int(max_inflight),
         alignment_timeout_seconds=float(alignment_timeout),
         auth_token=auth_token,
-        test_mode=is_test_mode(env),
+        test_mode=test_mode,
         test_delay_seconds=float(test_delay_seconds),
+        test_crash=test_crash,
         tls_cert_path=tls_cert_path,
         tls_key_path=tls_key_path,
     )
@@ -401,7 +414,31 @@ def build_server_credentials(config: ServerConfig) -> grpc.ServerCredentials | N
     return grpc.ssl_server_credentials(((key_bytes, certificate_bytes),))
 
 
-def ensure_deadline(context: grpc.ServicerContext) -> None:
+def resolve_time_remaining(
+    context: grpc.ServicerContext, test_mode: bool
+) -> float | None:
+    """Resolve request time remaining with optional test overrides."""
+    remaining = context.time_remaining()
+    if not test_mode:
+        return remaining
+    metadata: dict[str, str] = {}
+    for key, value in context.invocation_metadata():
+        metadata[str(key).lower()] = str(value)
+    override = metadata.get("x-test-remaining")
+    if override is None:
+        return remaining
+    token = override.strip().lower()
+    if token == "inf":
+        return math.inf
+    if token == "none":
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return remaining
+
+
+def ensure_deadline(context: grpc.ServicerContext, test_mode: bool = False) -> None:
     """Ensure the request deadline has not expired."""
     if not context.is_active():
         raise GrpcRequestError(
@@ -409,7 +446,7 @@ def ensure_deadline(context: grpc.ServicerContext) -> None:
             REQUEST_CANCELLED_CODE,
             "request cancelled",
         )
-    remaining = context.time_remaining()
+    remaining = resolve_time_remaining(context, test_mode)
     if remaining is not None and remaining <= 0:
         raise GrpcRequestError(
             grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -425,7 +462,7 @@ def collect_request(
     temp_root: Path,
 ) -> AlignRequest:
     """Collect a streaming request into a temporary WAV file."""
-    ensure_deadline(context)
+    ensure_deadline(context, config.test_mode)
     first = next(request_iterator, None)
     if first is None or first.WhichOneof("payload") != "init":
         raise GrpcRequestError(
@@ -514,8 +551,11 @@ def align_in_test_mode(
     request: AlignRequest,
     delay_seconds: float,
     sleep: Callable[[float], None],
+    crash: bool,
 ) -> list[audio_to_text.AlignedWord]:
     """Return deterministic fake alignment for integration tests."""
+    if crash:
+        raise RuntimeError("test alignment crash")
     if delay_seconds > 0:
         sleep(delay_seconds)
     aligned: list[audio_to_text.AlignedWord] = []
@@ -535,7 +575,7 @@ def align_in_test_mode(
 
 def align_in_process(request: AlignRequest) -> list[audio_to_text.AlignedWord]:
     """Run whisperx alignment in-process."""
-    device = audio_to_text.resolve_device(audio_to_text.DEVICE_AUTO)
+    device = audio_to_text.resolve_device()
     return audio_to_text.align_words(
         str(request.wav_path),
         request.transcript,
@@ -555,6 +595,7 @@ def build_alignment_runner(
             align_in_test_mode,
             delay_seconds=config.test_delay_seconds,
             sleep=sleep,
+            crash=config.test_crash,
         )
     return align_in_process
 
@@ -592,10 +633,8 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         request_id = uuid.uuid4().hex
         start_time = self._clock()
         success = False
-        metrics_started = False
         try:
             self._metrics.record_start()
-            metrics_started = True
             self._authorize(context)
             with tempfile.TemporaryDirectory(prefix="audio_to_text_grpc_") as temp_dir:
                 temp_root = Path(temp_dir)
@@ -609,9 +648,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                     request.audio_bytes,
                     request.language,
                 )
-                ensure_deadline(context)
+                ensure_deadline(context, self._config.test_mode)
                 aligned_words = self._run_alignment(request, context)
-                ensure_deadline(context)
+                ensure_deadline(context, self._config.test_mode)
                 srt_text = audio_to_text.build_srt(aligned_words)
             response_words = [
                 audio_to_text_grpc_pb2.AlignedWord(
@@ -635,13 +674,6 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                 exc.status.name,
             )
             context.abort(exc.status, f"{exc.code}: {exc}")
-        except audio_to_text.AlignmentValidationError as exc:
-            LOGGER.warning(
-                "audio_to_text_grpc.request.invalid id=%s code=%s",
-                request_id,
-                exc.code,
-            )
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"{exc.code}: {exc}")
         except audio_to_text.AlignmentPipelineError as exc:
             LOGGER.error(
                 "audio_to_text_grpc.request.error id=%s code=%s",
@@ -654,8 +686,7 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
             context.abort(grpc.StatusCode.INTERNAL, f"{ALIGNMENT_FAILED_CODE}: {exc}")
         finally:
             latency = max(0.0, self._clock() - start_time)
-            if metrics_started:
-                self._metrics.record_finish(success, latency)
+            self._metrics.record_finish(success, latency)
             self._inflight_semaphore.release()
 
     def GetStats(
@@ -730,7 +761,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         self, context: grpc.ServicerContext
     ) -> float | None:
         """Compute the effective alignment timeout."""
-        remaining = context.time_remaining()
+        remaining = resolve_time_remaining(context, self._config.test_mode)
+        if remaining is not None and math.isinf(remaining):
+            remaining = None
         if self._config.alignment_timeout_seconds <= 0:
             return remaining
         if remaining is None:
@@ -778,7 +811,12 @@ def serve(
 
     server.start()
     LOGGER.info("audio_to_text_grpc.server.started address=%s", address)
-    server.wait_for_termination()
+    try:
+        server.wait_for_termination()
+    except KeyboardInterrupt:
+        LOGGER.info("audio_to_text_grpc.server.shutdown: received interrupt")
+    finally:
+        server.stop(grace=None)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

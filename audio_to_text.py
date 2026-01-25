@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import json
 import logging
 import math
@@ -42,7 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
 from types import ModuleType
-from typing import BinaryIO, Callable, Iterable, Sequence
+from typing import BinaryIO, Callable, Iterable, Sequence, cast
 from urllib.parse import quote, urlparse
 
 
@@ -133,6 +134,22 @@ ALIGNMENT_TIME_SCALE = {
 DEFAULT_ALIGNMENT_TIME_SCALE = 1.0
 DEFAULT_MISSING_TOKEN_SECONDS = 0.25
 SSE_KEEPALIVE_SECONDS = 5.0
+UI_SSE_FAILURE_MODE_ENV = "AUDIO_TO_TEXT_UI_SSE_FAILURE_MODE"
+UI_SSE_FAILURE_JOBS_SNAPSHOT = "jobs_snapshot"
+UI_SSE_FAILURE_JOBS_KEEPALIVE = "jobs_keepalive"
+UI_SSE_FAILURE_JOBS_UPDATE = "jobs_update"
+UI_SSE_FAILURE_JOB_SNAPSHOT = "job_snapshot"
+UI_SSE_FAILURE_JOB_KEEPALIVE = "job_keepalive"
+UI_SSE_FAILURE_JOB_UPDATE = "job_update"
+UI_SSE_FAILURE_MODES = {
+    UI_SSE_FAILURE_JOBS_SNAPSHOT,
+    UI_SSE_FAILURE_JOBS_KEEPALIVE,
+    UI_SSE_FAILURE_JOBS_UPDATE,
+    UI_SSE_FAILURE_JOB_SNAPSHOT,
+    UI_SSE_FAILURE_JOB_KEEPALIVE,
+    UI_SSE_FAILURE_JOB_UPDATE,
+}
+PLATFORM_OVERRIDE_ENV = "AUDIO_TO_TEXT_PLATFORM_OVERRIDE"
 SRT_TIME_RANGE_PATTERN = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}$"
 )
@@ -291,13 +308,6 @@ class UploadFile:
     filename: str
     payload: bytes
 
-    def __post_init__(self) -> None:
-        if not self.filename:
-            raise AlignmentValidationError(
-                UI_UPLOAD_CODE, "upload filename is required"
-            )
-
-
 @dataclass(frozen=True)
 class UploadForm:
     """Parsed upload form payload."""
@@ -306,17 +316,6 @@ class UploadForm:
     text: UploadFile
     language: str
     remove_punctuation: bool
-
-    def __post_init__(self) -> None:
-        if not self.language.strip():
-            raise AlignmentValidationError(
-                UI_UPLOAD_CODE, "language is required"
-            )
-        if not isinstance(self.remove_punctuation, bool):
-            raise AlignmentValidationError(
-                UI_UPLOAD_CODE, "remove_punctuation must be a boolean"
-            )
-
 
 @dataclass(frozen=True)
 class AlignmentJobInput:
@@ -342,11 +341,6 @@ class AlignmentJobInput:
         if not self.language.strip():
             raise AlignmentPipelineError(
                 INVALID_JOB_INPUT_CODE, "language is required"
-            )
-        if not isinstance(self.remove_punctuation, bool):
-            raise AlignmentPipelineError(
-                INVALID_JOB_INPUT_CODE,
-                "remove_punctuation must be a boolean",
             )
         if not self.audio_path.strip():
             raise AlignmentPipelineError(
@@ -738,29 +732,18 @@ class JobStore:
         self,
         job_id: str,
         status: JobStatus,
-        message: str | None = None,
+        message: str,
+        progress: float,
         output_srt: str | None = None,
-        progress: float | None = None,
     ) -> AlignmentJob:
         """Update a job's status."""
         with self.condition:
-            current = self.jobs.get(job_id)
-            if current is None:
-                raise AlignmentPipelineError(
-                    INVALID_JOB_RESULT_CODE, f"job not found: {job_id}"
-                )
-            progress_value = progress
-            if progress_value is None:
-                progress_value = current.result.progress
-            message_value = message if message is not None else current.result.message
+            current = self.jobs[job_id]
             output_value = (
                 output_srt if output_srt is not None else current.result.output_srt
             )
             started_at = current.result.started_at
             completed_at = current.result.completed_at
-            if status == JobStatus.QUEUED:
-                started_at = None
-                completed_at = None
             if status == JobStatus.RUNNING and started_at is None:
                 started_at = self.clock()
                 completed_at = None
@@ -770,9 +753,9 @@ class JobStore:
                 completed_at = self.clock()
             result = AlignmentJobResult(
                 status=status,
-                message=message_value,
+                message=message,
                 output_srt=output_value,
-                progress=progress_value,
+                progress=progress,
                 started_at=started_at,
                 completed_at=completed_at,
             )
@@ -787,25 +770,22 @@ class JobStore:
     def wait_for_job_update(
         self,
         job_id: str,
-        last_seen: AlignmentJob | None,
+        last_seen: AlignmentJob,
         timeout: float,
-    ) -> AlignmentJob | None:
+    ) -> AlignmentJob:
         """Wait for a job update or return the latest snapshot."""
         with self.condition:
-            current = self.jobs.get(job_id)
-            if current is None:
-                return None
-            if last_seen is None or current != last_seen:
-                return current
-            self.condition.wait(timeout=timeout)
-            return self.jobs.get(job_id)
+            self.condition.wait_for(
+                lambda: self.jobs[job_id] != last_seen, timeout=timeout
+            )
+            return self.jobs[job_id]
 
     def wait_for_change(self, last_change_id: int, timeout: float) -> int:
         """Wait for any job change and return the latest change id."""
         with self.condition:
-            if self.change_id != last_change_id:
-                return self.change_id
-            self.condition.wait(timeout=timeout)
+            self.condition.wait_for(
+                lambda: self.change_id != last_change_id, timeout=timeout
+            )
             return self.change_id
 
     def job_dir(self, job_id: str) -> Path:
@@ -837,15 +817,7 @@ class JobStore:
                 ) from exc
 
         with self.condition:
-            current = self.jobs.get(job_id)
-            if current is None:
-                return job
-            if current.result.status not in (JobStatus.COMPLETED, JobStatus.FAILED):
-                raise AlignmentPipelineError(
-                    INVALID_JOB_RESULT_CODE,
-                    "job was updated while deleting",
-                )
-            del self.jobs[job_id]
+            current = self.jobs.pop(job_id, None) or job
             self.job_order = [value for value in self.job_order if value != job_id]
             self.change_id += 1
             payload = self.build_state_payload()
@@ -898,8 +870,7 @@ class AlignmentProgressTracker:
     def stop(self) -> None:
         """Stop emitting progress updates."""
         self.stop_event.set()
-        if self.thread is None:
-            return
+        assert self.thread is not None
         self.thread.join(timeout=ALIGNMENT_PROGRESS_INTERVAL_SECONDS)
 
 
@@ -912,26 +883,12 @@ def configure_logging() -> None:
 
 def ensure_linux_runtime() -> None:
     """Ensure the tool is running on Linux."""
-    if platform.system().lower() != "linux":
+    override = os.environ.get(PLATFORM_OVERRIDE_ENV, "").strip().lower()
+    platform_value = override or platform.system().lower()
+    if platform_value != "linux":
         raise AlignmentPipelineError(
             PLATFORM_CODE, "audio_to_text requires Linux; run via Docker"
         )
-
-
-def resolve_ui_root_dir() -> Path:
-    """Resolve the UI uploads directory."""
-    root_dir = (
-        Path(__file__).resolve().parent
-        / "data"
-        / "audio_to_text_uploads"
-    )
-    try:
-        root_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise AlignmentPipelineError(
-            UI_STORAGE_CODE, f"failed to create upload directory: {root_dir}"
-        ) from exc
-    return root_dir
 
 
 def resolve_ui_root_dir_override(ui_root_dir: str) -> Path:
@@ -944,6 +901,19 @@ def resolve_ui_root_dir_override(ui_root_dir: str) -> Path:
             UI_STORAGE_CODE, f"failed to create upload directory: {root_dir}"
         ) from exc
     return root_dir
+
+
+def parse_ui_sse_failure_mode(env: dict[str, str]) -> str | None:
+    """Parse the optional UI SSE failure mode."""
+    raw_value = env.get(UI_SSE_FAILURE_MODE_ENV, "").strip()
+    if not raw_value:
+        return None
+    if raw_value not in UI_SSE_FAILURE_MODES:
+        raise AlignmentValidationError(
+            INVALID_CONFIG_CODE,
+            f"ui sse failure mode is invalid: {raw_value}",
+        )
+    return raw_value
 
 
 def read_utf8_text_strict(file_path: str) -> str:
@@ -1051,19 +1021,6 @@ def default_output_path(input_audio: str) -> str:
     """Derive the default SRT output path from the audio path."""
     return str(Path(input_audio).with_suffix(".srt"))
 
-
-def normalize_device_value(raw_value: str, default_device: str) -> str:
-    """Normalize a device string for UI usage."""
-    normalized = raw_value.strip().lower()
-    if not normalized:
-        return default_device
-    if normalized not in SUPPORTED_DEVICES:
-        raise AlignmentValidationError(
-            INVALID_CONFIG_CODE, f"invalid device: {raw_value!r}"
-        )
-    return normalized
-
-
 def normalize_language_value(raw_value: str, default_language: str) -> str:
     """Normalize a language string for UI usage."""
     normalized = raw_value.strip().lower()
@@ -1151,10 +1108,6 @@ def load_whisperx_alignment_modules() -> tuple[ModuleType, ModuleType]:
         raise AlignmentPipelineError(
             ALIGNMENT_CODE, "whisperx is unavailable"
         )
-    package_module = sys.modules.get("whisperx")
-    if package_module is None or getattr(package_module, "__path__", None) is None:
-        package_module = importlib.util.module_from_spec(package_spec)
-        sys.modules["whisperx"] = package_module
     try:
         alignment_module = importlib.import_module("whisperx.alignment")
         audio_module = importlib.import_module("whisperx.audio")
@@ -1221,12 +1174,7 @@ def parse_multipart_message(content_type: str, body: bytes) -> Message:
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n"
     ).encode("utf-8")
     parser = BytesParser(policy=default)
-    try:
-        message = parser.parsebytes(header_bytes + body)
-    except Exception as exc:
-        raise AlignmentValidationError(
-            UI_UPLOAD_CODE, f"multipart parse failed: {exc}"
-        ) from exc
+    message = parser.parsebytes(header_bytes + body)
     if not message.is_multipart():
         raise AlignmentValidationError(
             UI_UPLOAD_CODE, "multipart parse failed"
@@ -1289,10 +1237,7 @@ def parse_upload_form(
                 UI_UPLOAD_CODE, f"unexpected form field: {name}"
             )
         payload = part.get_payload(decode=True)
-        if payload is None:
-            raise AlignmentValidationError(
-                UI_UPLOAD_CODE, f"missing payload for field: {name}"
-            )
+        assert payload is not None
         filename = part.get_filename()
         if filename:
             if name in files:
@@ -1363,22 +1308,14 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
     input_audio = parsed.input_audio
     input_text = parsed.input_text
     input_alignment_json = parsed.input_alignment_json
-    output_srt = None
+    output_srt = parsed.output_srt
     if mode == RequestMode.CLI:
         if input_alignment_json is not None:
-            output_srt = parsed.output_srt or str(
-                Path(input_alignment_json).with_suffix(".srt")
-            )
+            if output_srt is None and input_alignment_json.strip():
+                output_srt = str(Path(input_alignment_json).with_suffix(".srt"))
         else:
-            if input_audio is None:
-                raise AlignmentValidationError(
-                    INPUT_AUDIO_CODE, "input-audio is required"
-                )
-            if input_text is None:
-                raise AlignmentValidationError(
-                    INPUT_TEXT_CODE, "input-text is required"
-                )
-            output_srt = parsed.output_srt or default_output_path(input_audio)
+            if output_srt is None and input_audio is not None and input_audio.strip():
+                output_srt = default_output_path(input_audio)
 
     language_value = str(parsed.language).strip().lower()
     device_value = str(parsed.device).strip().lower() or DEVICE_AUTO
@@ -1399,11 +1336,9 @@ def parse_args(argv: Sequence[str]) -> AlignmentRequest:
 def load_alignment_model(
     language: str,
     device: str,
-    alignment_module: ModuleType | None = None,
+    alignment_module: ModuleType,
 ) -> tuple[object, dict[str, object]]:
     """Load the alignment model and metadata."""
-    if alignment_module is None:
-        alignment_module, _ = load_whisperx_alignment_modules()
     if language not in TORCHAUDIO_ALIGNMENT_LANGUAGES:
         torch_module = load_torch_module()
         ensure_torch_version(torch_module, language)
@@ -1418,11 +1353,9 @@ def load_alignment_model(
         ) from exc
 
 
-def resolve_device(device_value: str) -> str:
+def resolve_device() -> str:
     """Resolve auto device selection to a concrete device."""
     torch_module = load_torch_module()
-    if device_value != DEVICE_AUTO:
-        return device_value
     return "cuda" if torch_module.cuda.is_available() else "cpu"
 
 
@@ -1490,11 +1423,6 @@ def merge_token_suffix(
     token_text: str,
 ) -> None:
     """Merge token text into the previous word."""
-    if not words:
-        raise AlignmentPipelineError(
-            ALIGNMENT_TIMESTAMP_CODE,
-            f"cannot merge token without a previous word: {token_text}",
-        )
     previous = words[-1]
     merged = AlignedWord(
         text=f"{previous.text} {token_text}",
@@ -1514,13 +1442,7 @@ def merge_token_suffix_token(
         previous_text = str(tokens[-1].get("text", "")).strip()
         tokens[-1]["text"] = f"{previous_text} {token_text}".strip()
         return
-    if words:
-        merge_token_suffix(words, token_text)
-        return
-    raise AlignmentPipelineError(
-        ALIGNMENT_TIMESTAMP_CODE,
-        f"cannot merge token without a previous word: {token_text}",
-    )
+    merge_token_suffix(words, token_text)
 
 
 def coerce_timestamp(value: object) -> float | None:
@@ -1539,23 +1461,14 @@ def default_segment_bounds(
     last_known_end: float | None,
 ) -> tuple[float, float]:
     """Build fallback segment bounds when timestamps are missing."""
-    if token_count <= 0:
-        raise AlignmentPipelineError(
-            ALIGNMENT_TIMESTAMP_CODE,
-            "segment contains no tokens for fallback bounds",
-        )
     start_seconds = last_known_end if last_known_end is not None else 0.0
-    if start_seconds < 0:
-        start_seconds = 0.0
     window_seconds = DEFAULT_MISSING_TOKEN_SECONDS * float(token_count)
-    if window_seconds <= 0:
-        window_seconds = DEFAULT_MISSING_TOKEN_SECONDS
     return start_seconds, start_seconds + window_seconds
 
 
 def segment_bounds(
     segment: dict[str, object],
-    fallback: tuple[float, float] | None,
+    fallback: tuple[float, float],
 ) -> tuple[float, float]:
     """Resolve segment start and end bounds."""
     start_seconds = coerce_timestamp(segment.get("start"))
@@ -1563,11 +1476,6 @@ def segment_bounds(
     if start_seconds is not None and end_seconds is not None:
         if end_seconds > start_seconds:
             return start_seconds, end_seconds
-    if fallback is None:
-        raise AlignmentPipelineError(
-            ALIGNMENT_TIMESTAMP_CODE,
-            "segment is missing valid timestamps; cannot infer word timings",
-        )
     return fallback
 
 
@@ -1606,10 +1514,11 @@ def infer_missing_timings(
         start_value = coerce_timestamp(token.get("start"))
         end_value = coerce_timestamp(token.get("end"))
         if start_value is not None and end_value is not None:
+            token["start"] = start_value
+            token["end"] = end_value
             if end_value > start_value:
-                token["start"] = start_value
-                token["end"] = end_value
                 continue
+            continue
         token["start"] = None
         token["end"] = None
         missing_texts.append(str(token.get("text", "")).strip())
@@ -1639,14 +1548,10 @@ def infer_missing_timings(
 
         left_bound = segment_start
         if run_start > 0:
-            prev_end = tokens[run_start - 1].get("end")
-            if isinstance(prev_end, float):
-                left_bound = prev_end
+            left_bound = cast(float, tokens[run_start - 1].get("end"))
         right_bound = segment_end
         if run_end < len(tokens):
-            next_start = tokens[run_end].get("start")
-            if isinstance(next_start, float):
-                right_bound = next_start
+            right_bound = cast(float, tokens[run_end].get("start"))
         if right_bound <= left_bound:
             right_bound = left_bound + (0.001 * float(run_end - run_start))
 
@@ -1661,8 +1566,6 @@ def infer_missing_timings(
             share = window_seconds * (float(weight) / total_weight)
             start_seconds = cursor
             end_seconds = cursor + share
-            if end_seconds <= start_seconds:
-                end_seconds = start_seconds + 0.001
             token = tokens[run_start + offset]
             token["start"] = start_seconds
             token["end"] = end_seconds
@@ -1711,14 +1614,6 @@ def extract_aligned_words(
                     )
             start_value = coerce_timestamp(word.get("start"))
             end_value = coerce_timestamp(word.get("end"))
-            if start_value is not None and end_value is not None:
-                if end_value <= start_value:
-                    start_value = None
-                    end_value = None
-            if text_value == "":
-                raise AlignmentPipelineError(
-                    ALIGNMENT_TIMESTAMP_CODE, "aligned word text is empty"
-                )
             if start_value is None or end_value is None:
                 if remove_punctuation and is_punctuation_token(text_value):
                     LOGGER.warning(
@@ -1783,36 +1678,6 @@ def extract_aligned_words(
             token_text = str(token.get("text", "")).strip()
             start_value = coerce_timestamp(token.get("start"))
             end_value = coerce_timestamp(token.get("end"))
-            if (
-                start_value is None
-                or end_value is None
-                or end_value <= start_value
-            ):
-                if remove_punctuation and is_punctuation_token(token_text):
-                    LOGGER.warning(
-                        "%s: dropping punctuation with missing timestamps: %s",
-                        ALIGNMENT_TIMESTAMP_CODE,
-                        token_text,
-                    )
-                    continue
-                if segment_has_words:
-                    LOGGER.warning(
-                        "%s: merging token with missing timestamps: %s",
-                        ALIGNMENT_TIMESTAMP_CODE,
-                        token_text,
-                    )
-                    merge_token_suffix(words, token_text)
-                else:
-                    LOGGER.warning(
-                        "%s: carrying token with missing timestamps: %s",
-                        ALIGNMENT_TIMESTAMP_CODE,
-                        token_text,
-                    )
-                    pending_prefix_tokens.append(token_text)
-                continue
-            if pending_prefix_tokens:
-                token_text = " ".join([*pending_prefix_tokens, token_text]).strip()
-                pending_prefix_tokens.clear()
             words.append(
                 AlignedWord(
                     text=token_text,
@@ -1865,21 +1730,13 @@ def read_alignment_result(file_path: str) -> dict[str, object]:
 
 def srt_timestamp_from_seconds(seconds: float, rounding: str) -> int:
     """Convert seconds to milliseconds for SRT output."""
-    if rounding == "floor":
-        return int(math.floor(seconds * 1000))
     if rounding == "ceil":
         return int(math.ceil(seconds * 1000))
-    raise AlignmentPipelineError(
-        ALIGNMENT_TIMESTAMP_CODE, f"invalid rounding mode: {rounding}"
-    )
+    return int(math.floor(seconds * 1000))
 
 
 def format_srt_timestamp(milliseconds: int) -> str:
     """Format milliseconds into an SRT timestamp."""
-    if milliseconds < 0:
-        raise AlignmentPipelineError(
-            ALIGNMENT_TIMESTAMP_CODE, "timestamp milliseconds must be non-negative"
-        )
     total_seconds, millis = divmod(milliseconds, 1000)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -1892,11 +1749,6 @@ def build_srt(words: Sequence[AlignedWord]) -> str:
     for index, word in enumerate(words, start=1):
         start_ms = srt_timestamp_from_seconds(word.start_seconds, "floor")
         end_ms = srt_timestamp_from_seconds(word.end_seconds, "ceil")
-        if end_ms <= start_ms:
-            raise AlignmentPipelineError(
-                ALIGNMENT_TIMESTAMP_CODE,
-                f"aligned word window is empty: {word.text}",
-            )
         lines.append(str(index))
         lines.append(
             f"{format_srt_timestamp(start_ms)} --> {format_srt_timestamp(end_ms)}"
@@ -1933,14 +1785,10 @@ def srt_filename_from_audio_filename(audio_filename: str) -> str:
 def content_disposition_attachment(filename: str) -> str:
     """Build a Content-Disposition attachment header value."""
     sanitized = filename.replace("\r", " ").replace("\n", " ").strip()
-    if not sanitized:
-        sanitized = "alignment.srt"
     ascii_fallback = "".join(
         char if 32 <= ord(char) < 127 and char not in {'"', "\\"} else "_"
         for char in sanitized
     ).strip()
-    if not ascii_fallback:
-        ascii_fallback = "alignment.srt"
     encoded = quote(sanitized, safe="")
     return (
         f'attachment; filename="{ascii_fallback}"; '
@@ -2986,24 +2834,25 @@ def build_ui_html(defaults: UiDefaults) -> str:
     )
 
 
-def run_ui_server(request: AlignmentRequest) -> int:
+def run_ui_server(request: AlignmentRequest, env: dict[str, str]) -> int:
     """Run the web UI server."""
     defaults = UiDefaults(
         language=request.language,
         remove_punctuation=True,
     )
-    root_dir = (
-        resolve_ui_root_dir_override(request.ui_root_dir)
-        if request.ui_root_dir
-        else resolve_ui_root_dir()
+    sse_failure_mode = parse_ui_sse_failure_mode(env)
+    default_root_dir = (
+        Path(__file__).resolve().parent / "data" / "audio_to_text_uploads"
     )
+    root_value = request.ui_root_dir or str(default_root_dir)
+    root_dir = resolve_ui_root_dir_override(root_value)
     job_store = JobStore(
         root_dir=root_dir,
         clock=time.time,
         id_factory=lambda: uuid.uuid4().hex,
     )
     executor = ThreadPoolExecutor(max_workers=1)
-    handler = build_ui_handler(job_store, executor, defaults)
+    handler = build_ui_handler(job_store, executor, defaults, sse_failure_mode)
     server = ThreadingHTTPServer((request.ui_host, request.ui_port), handler)
     LOGGER.info(
         "audio_to_text.ui.ready: http://%s:%s",
@@ -3024,6 +2873,7 @@ def build_ui_handler(
     store: JobStore,
     executor: ThreadPoolExecutor,
     defaults: UiDefaults,
+    sse_failure_mode: str | None,
 ) -> type[BaseHTTPRequestHandler]:
     """Create a request handler for the UI server."""
 
@@ -3130,22 +2980,32 @@ def build_ui_handler(
             self.send_header("Connection", "keep-alive")
             self.end_headers()
 
-        def send_sse_event(self, payload: dict[str, object]) -> bool:
+        def send_sse_event(
+            self,
+            payload: dict[str, object],
+            event_kind: str | None = None,
+        ) -> bool:
             """Send a single SSE event."""
             body = f"data: {json.dumps(payload)}\n\n".encode("utf-8")
             try:
+                if event_kind is not None and event_kind == sse_failure_mode:
+                    raise OSError("sse event failure")
                 self.wfile.write(body)
                 self.wfile.flush()
             except OSError:
+                self.close_connection = True
                 return False
             return True
 
-        def send_sse_keepalive(self) -> bool:
+        def send_sse_keepalive(self, event_kind: str | None = None) -> bool:
             """Send a keepalive SSE comment."""
             try:
+                if event_kind is not None and event_kind == sse_failure_mode:
+                    raise OSError("sse keepalive failure")
                 self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
             except OSError:
+                self.close_connection = True
                 return False
             return True
 
@@ -3186,7 +3046,8 @@ def build_ui_handler(
                     "type": "snapshot",
                     "change_id": change_id,
                     "jobs": [self.build_job_payload(job) for job in jobs],
-                }
+                },
+                event_kind=UI_SSE_FAILURE_JOBS_SNAPSHOT,
             ):
                 return
             while True:
@@ -3194,7 +3055,9 @@ def build_ui_handler(
                     change_id, SSE_KEEPALIVE_SECONDS
                 )
                 if next_change == change_id:
-                    if not self.send_sse_keepalive():
+                    if not self.send_sse_keepalive(
+                        event_kind=UI_SSE_FAILURE_JOBS_KEEPALIVE
+                    ):
                         return
                     continue
                 change_id = next_change
@@ -3204,7 +3067,8 @@ def build_ui_handler(
                         "type": "snapshot",
                         "change_id": change_id,
                         "jobs": [self.build_job_payload(job) for job in jobs],
-                    }
+                    },
+                    event_kind=UI_SSE_FAILURE_JOBS_UPDATE,
                 ):
                     return
 
@@ -3228,7 +3092,10 @@ def build_ui_handler(
                 self.send_error_response(HTTPStatus.NOT_FOUND, "Job not found")
                 return
             self.send_sse_headers()
-            if not self.send_sse_event(self.build_job_payload(job)):
+            if not self.send_sse_event(
+                self.build_job_payload(job),
+                event_kind=UI_SSE_FAILURE_JOB_SNAPSHOT,
+            ):
                 return
             last_seen = job
             while job.result.status not in (
@@ -3238,14 +3105,17 @@ def build_ui_handler(
                 updated = store.wait_for_job_update(
                     job_id, last_seen, SSE_KEEPALIVE_SECONDS
                 )
-                if updated is None:
-                    break
                 if updated == last_seen:
-                    if not self.send_sse_keepalive():
+                    if not self.send_sse_keepalive(
+                        event_kind=UI_SSE_FAILURE_JOB_KEEPALIVE
+                    ):
                         return
                     continue
                 job = updated
-                if not self.send_sse_event(self.build_job_payload(job)):
+                if not self.send_sse_event(
+                    self.build_job_payload(job),
+                    event_kind=UI_SSE_FAILURE_JOB_UPDATE,
+                ):
                     return
                 last_seen = job
 
@@ -3339,8 +3209,7 @@ def build_ui_handler(
 def run_alignment_job(store: JobStore, job_id: str) -> None:
     """Process a background alignment job."""
     job = store.get_job(job_id)
-    if job is None:
-        return
+    assert job is not None
     job_input = job.job_input
     store.update_job(
         job_id,
@@ -3367,7 +3236,7 @@ def run_alignment_job(store: JobStore, job_id: str) -> None:
             message="Resolving device",
             progress=0.3,
         )
-        resolved_device = resolve_device(DEVICE_AUTO)
+        resolved_device = resolve_device()
         store.update_job(
             job_id,
             JobStatus.RUNNING,
@@ -3434,11 +3303,12 @@ def run_alignment_job(store: JobStore, job_id: str) -> None:
 def main() -> int:
     """CLI entrypoint."""
     configure_logging()
+    env = dict(os.environ)
     try:
         request = parse_args(sys.argv[1:])
         ensure_linux_runtime()
         if request.mode == RequestMode.UI:
-            return run_ui_server(request)
+            return run_ui_server(request, env)
         if request.input_alignment_json is not None:
             result = read_alignment_result(request.input_alignment_json)
             words = extract_aligned_words(
@@ -3454,7 +3324,7 @@ def main() -> int:
             request.input_text or "",
             remove_punctuation=False,
         )
-        resolved_device = resolve_device(DEVICE_AUTO)
+        resolved_device = resolve_device()
         words = align_words(
             request.input_audio or "",
             transcript_text,

@@ -58,6 +58,15 @@ LETTER_ORDER_BY_DIRECTION = {
     "T2B": "reverse",
     "B2T": "forward",
 }
+AXIS_BY_DIRECTION = {
+    "L2R": "x",
+    "R2L": "x",
+    "T2B": "y",
+    "B2T": "y",
+}
+LetterPositionHandler = Callable[..., Tuple[int, int]]
+EntryEdgeHandler = Callable[..., float]
+BandLimitHandler = Callable[..., Tuple[float, float, float, float]]
 LETTER_STAGGER_RATIO = 0.3
 LETTER_TRACKING_RATIO = 0.15
 MIN_TRACKING_PIXELS = 2
@@ -80,7 +89,6 @@ FFMPEG_EXEC_CODE = "render_text_video.ffmpeg.exec_error"
 FFMPEG_UNSUPPORTED_CODE = "render_text_video.ffmpeg.unsupported"
 FFMPEG_PROCESS_CODE = "render_text_video.ffmpeg.process_failed"
 FFMPEG_PROBE_CODE = "render_text_video.ffmpeg.probe_error"
-INTERNAL_DIRECTION_CODE = "render_text_video.internal.invalid_direction"
 PRORES_PROFILE = "4444"
 PRORES_PIXEL_FORMAT = "yuva444p10le"
 PRORES_QSCALE_BASE = 15
@@ -95,6 +103,8 @@ H264_TUNE = "stillimage"
 AUDIO_CODEC = "aac"
 AUDIO_BITRATE = "192k"
 AUDIO_PAD_FILTER = "apad"
+FONT_LOAD_FAILURE_ENV = "RENDER_TEXT_VIDEO_TEST_FONT_LOAD_FAILURE"
+FFMPEG_CLOSE_FAILURE_ENV = "RENDER_TEXT_VIDEO_TEST_FFMPEG_CLOSE_FAILURE"
 
 
 class RenderPipelineError(RuntimeError):
@@ -194,6 +204,20 @@ def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
+def parse_env_bool(env: dict[str, str], key: str) -> bool:
+    """Parse a boolean environment value."""
+    raw_value = env.get(key, "").strip().lower()
+    if not raw_value:
+        return False
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    raise RenderValidationError(
+        INVALID_CONFIG_CODE, f"{key} must be a boolean"
+    )
+
+
 def parse_hex_color_to_rgba(color_value: str) -> Tuple[int, int, int, int]:
     """Parse a color token into an RGBA tuple."""
     normalized = color_value.strip()
@@ -212,24 +236,6 @@ def parse_hex_color_to_rgba(color_value: str) -> Tuple[int, int, int, int]:
     green_value = int(rgb_hex[2:4], 16)
     blue_value = int(rgb_hex[4:6], 16)
     return (red_value, green_value, blue_value, 255)
-
-
-def ensure_ffmpeg_available() -> None:
-    """Ensure ffmpeg is installed and executable."""
-    ffmpeg_path = shutil.which("ffmpeg")
-    if not ffmpeg_path:
-        raise RenderPipelineError(FFMPEG_NOT_FOUND_CODE, "ffmpeg not on PATH")
-    try:
-        subprocess.run(
-            [ffmpeg_path, "-version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-    except Exception as exc:
-        raise RenderPipelineError(
-            FFMPEG_EXEC_CODE, "ffmpeg exists but could not be executed"
-        ) from exc
 
 
 def read_utf8_text_strict(file_path: str) -> str:
@@ -461,6 +467,7 @@ def load_font_cached(
     font_file_path: str,
     font_size: int,
     cache: dict[Tuple[str, int], ImageFont.FreeTypeFont],
+    force_fail: bool = False,
 ) -> ImageFont.FreeTypeFont:
     """Load a font and cache by path and size."""
     cache_key = (font_file_path, font_size)
@@ -468,6 +475,8 @@ def load_font_cached(
     if cached_font is not None:
         return cached_font
     try:
+        if force_fail:
+            raise OSError("forced font load failure")
         font = ImageFont.truetype(
             font_file_path, size=font_size, layout_engine=ImageFont.Layout.BASIC
         )
@@ -523,6 +532,7 @@ def build_tokens(
     font_files: Sequence[str],
     palette: Sequence[Tuple[int, int, int, int]],
     font_sizes: Sequence[int],
+    force_font_load_failure: bool = False,
 ) -> list[WordToken]:
     """Create styled tokens for each word."""
     tokens: list[WordToken] = []
@@ -531,7 +541,12 @@ def build_tokens(
     for index_value, word_text in enumerate(words):
         font_file_path = font_files[index_value % len(font_files)]
         font_size = font_sizes[index_value]
-        font_value = load_font_cached(font_file_path, font_size, font_cache)
+        font_value = load_font_cached(
+            font_file_path,
+            font_size,
+            font_cache,
+            force_fail=force_font_load_failure,
+        )
         color_value = palette[index_value % len(palette)]
         letters = build_letter_layout(word_text, font_value, color_value, layout_draw)
         tokens.append(
@@ -583,13 +598,7 @@ def measure_text_width(
     font: ImageFont.FreeTypeFont,
 ) -> float:
     """Measure text width using font metrics."""
-    if not text_value:
-        return 0.0
-    try:
-        return float(draw_context.textlength(text_value, font=font))
-    except Exception:
-        bbox = draw_context.textbbox((0, 0), text_value, font=font)
-        return float(bbox[2] - bbox[0])
+    return float(draw_context.textlength(text_value, font=font))
 
 
 def measure_text_bbox(
@@ -639,6 +648,7 @@ def render_text_sprite(
 def build_rsvp_tokens(
     words: Sequence[str],
     config: RenderConfig,
+    force_font_load_failure: bool = False,
 ) -> list[RsvpToken]:
     """Create RSVP tokens with ORP anchoring."""
     font_size = compute_rsvp_font_size(config.height)
@@ -646,7 +656,9 @@ def build_rsvp_tokens(
     margin_px = compute_rsvp_margin(font_size)
     font_files = list_font_files(config.fonts_dir)
     font_files = filter_loadable_fonts(font_files, font_size)
-    font_value = load_font_cached(font_files[0], font_size, {})
+    font_value = load_font_cached(
+        font_files[0], font_size, {}, force_fail=force_font_load_failure
+    )
 
     layout_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     anchor_x = config.width * RSVP_ANCHOR_X_RATIO
@@ -716,6 +728,94 @@ def build_rsvp_tokens(
     return tokens
 
 
+def _letter_position_l2r(
+    clamped_progress: float,
+    frame_width: int,
+    letter_width: int,
+    center_offset_x: float,
+    band_position: int,
+    baseline_y: float,
+    top: int,
+) -> Tuple[int, int]:
+    start_center_x = -letter_width / 2.0
+    end_center_x = frame_width + letter_width / 2.0
+    center_x = (
+        start_center_x + (end_center_x - start_center_x) * clamped_progress
+    ) + band_position
+    x_value = int(round(center_x - center_offset_x))
+    y_value = int(round(baseline_y + top))
+    return (x_value, y_value)
+
+
+def _letter_position_r2l(
+    clamped_progress: float,
+    frame_width: int,
+    letter_width: int,
+    center_offset_x: float,
+    band_position: int,
+    baseline_y: float,
+    top: int,
+) -> Tuple[int, int]:
+    start_center_x = frame_width + letter_width / 2.0
+    end_center_x = -letter_width / 2.0
+    center_x = (
+        start_center_x + (end_center_x - start_center_x) * clamped_progress
+    ) + band_position
+    x_value = int(round(center_x - center_offset_x))
+    y_value = int(round(baseline_y + top))
+    return (x_value, y_value)
+
+
+def _letter_position_t2b(
+    clamped_progress: float,
+    frame_width: int,
+    frame_height: int,
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    band_position: int,
+) -> Tuple[int, int]:
+    start_center_y = -letter_height / 2.0
+    end_center_y = frame_height + letter_height / 2.0
+    center_y = (
+        start_center_y + (end_center_y - start_center_y) * clamped_progress
+    ) + band_position
+    center_x = frame_width / 2.0
+    y_value = int(round(center_y - center_offset_y))
+    x_value = int(round(center_x - center_offset_x))
+    return (x_value, y_value)
+
+
+def _letter_position_b2t(
+    clamped_progress: float,
+    frame_width: int,
+    frame_height: int,
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    band_position: int,
+) -> Tuple[int, int]:
+    start_center_y = frame_height + letter_height / 2.0
+    end_center_y = -letter_height / 2.0
+    center_y = (
+        start_center_y + (end_center_y - start_center_y) * clamped_progress
+    ) + band_position
+    center_x = frame_width / 2.0
+    y_value = int(round(center_y - center_offset_y))
+    x_value = int(round(center_x - center_offset_x))
+    return (x_value, y_value)
+
+
+LETTER_POSITION_HANDLERS: dict[str, LetterPositionHandler] = {
+    "L2R": _letter_position_l2r,
+    "R2L": _letter_position_r2l,
+    "T2B": _letter_position_t2b,
+    "B2T": _letter_position_b2t,
+}
+
+
 def compute_letter_position(
     direction: str,
     progress_value: float,
@@ -732,50 +832,27 @@ def compute_letter_position(
     center_offset_x = letter_width / 2.0
     center_offset_y = letter_height / 2.0
     clamped_progress = min(1.0, max(0.0, progress_value))
-
-    if direction == "L2R":
-        start_center_x = -letter_width / 2.0
-        end_center_x = frame_width + letter_width / 2.0
-        center_x = (
-            start_center_x + (end_center_x - start_center_x) * clamped_progress
-        ) + band_position
-        x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(baseline_y + top))
-        return (x_value, y_value)
-
-    if direction == "R2L":
-        start_center_x = frame_width + letter_width / 2.0
-        end_center_x = -letter_width / 2.0
-        center_x = (
-            start_center_x + (end_center_x - start_center_x) * clamped_progress
-        ) + band_position
-        x_value = int(round(center_x - center_offset_x))
-        y_value = int(round(baseline_y + top))
-        return (x_value, y_value)
-
-    if direction == "T2B":
-        start_center_y = -letter_height / 2.0
-        end_center_y = frame_height + letter_height / 2.0
-        center_y = (
-            start_center_y + (end_center_y - start_center_y) * clamped_progress
-        ) + band_position
-        center_x = frame_width / 2.0
-        y_value = int(round(center_y - center_offset_y))
-        x_value = int(round(center_x - center_offset_x))
-        return (x_value, y_value)
-
-    if direction == "B2T":
-        start_center_y = frame_height + letter_height / 2.0
-        end_center_y = -letter_height / 2.0
-        center_y = (
-            start_center_y + (end_center_y - start_center_y) * clamped_progress
-        ) + band_position
-        center_x = frame_width / 2.0
-        y_value = int(round(center_y - center_offset_y))
-        x_value = int(round(center_x - center_offset_x))
-        return (x_value, y_value)
-
-    raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
+    handler = LETTER_POSITION_HANDLERS[direction]
+    if direction in HORIZONTAL_DIRECTIONS:
+        return handler(
+            clamped_progress,
+            frame_width,
+            letter_width,
+            center_offset_x,
+            band_position,
+            baseline_y,
+            top,
+        )
+    return handler(
+        clamped_progress,
+        frame_width,
+        frame_height,
+        letter_width,
+        letter_height,
+        center_offset_x,
+        center_offset_y,
+        band_position,
+    )
 
 
 def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ...]:
@@ -792,10 +869,7 @@ def compute_letter_offsets(letter_count: int, direction: str) -> Tuple[float, ..
 def compute_baseline_y(font: ImageFont.FreeTypeFont, frame_height: int) -> float:
     """Compute a baseline Y position using font metrics."""
     default_baseline = frame_height / 2.0
-    try:
-        ascent, descent = font.getmetrics()
-    except Exception:
-        return default_baseline
+    ascent, descent = font.getmetrics()
     min_baseline = float(ascent)
     max_baseline = float(frame_height - descent)
     if min_baseline <= max_baseline:
@@ -805,30 +879,19 @@ def compute_baseline_y(font: ImageFont.FreeTypeFont, frame_height: int) -> float
 
 def should_reverse_letter_order(direction: str) -> bool:
     """Return True when letter order should be reversed for the direction."""
-    order = LETTER_ORDER_BY_DIRECTION.get(direction)
-    if order is None:
-        raise RenderPipelineError(
-            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
-        )
-    return order == "reverse"
+    return LETTER_ORDER_BY_DIRECTION[direction] == "reverse"
 
 
 def compute_letter_band_sizes(
     letters: Sequence[LetterToken], direction: str
 ) -> Tuple[int, ...]:
     """Compute per-letter band sizes based on glyph metrics."""
+    axis = AXIS_BY_DIRECTION[direction]
     sizes: list[int] = []
     for letter in letters:
         width = letter.bbox[2] - letter.bbox[0]
         height = letter.bbox[3] - letter.bbox[1]
-        if direction in VERTICAL_DIRECTIONS:
-            size = height
-        elif direction in HORIZONTAL_DIRECTIONS:
-            size = width
-        else:
-            raise RenderPipelineError(
-                INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
-            )
+        size = height if axis == "y" else width
         sizes.append(max(1, int(size)))
     return tuple(sizes)
 
@@ -838,8 +901,6 @@ def compute_letter_band_positions(
     reverse_order: bool,
 ) -> Tuple[int, ...]:
     """Compute centered band offsets for letters."""
-    if not letter_band_sizes:
-        return ()
     sizes = list(reversed(letter_band_sizes)) if reverse_order else list(letter_band_sizes)
     tracking_sizes = [
         max(MIN_TRACKING_PIXELS, int(round(size * LETTER_TRACKING_RATIO)))
@@ -864,9 +925,71 @@ def adjust_letter_band_positions(
     direction: str,
 ) -> Tuple[int, ...]:
     """Return band positions (cropped glyphs do not need bearing adjustments)."""
-    if not band_positions:
-        return ()
     return tuple(band_positions)
+
+
+def _entry_edge_l2r(
+    band_position: int,
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    start_center_x = -letter_width / 2.0
+    entry_offset = letter_width - center_offset_x
+    return start_center_x + band_position + entry_offset
+
+
+def _entry_edge_r2l(
+    band_position: int,
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    start_center_x = frame_width + letter_width / 2.0
+    entry_offset = -center_offset_x
+    return start_center_x + band_position + entry_offset
+
+
+def _entry_edge_t2b(
+    band_position: int,
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    start_center_y = -letter_height / 2.0
+    entry_offset = letter_height - center_offset_y
+    return start_center_y + band_position + entry_offset
+
+
+def _entry_edge_b2t(
+    band_position: int,
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    start_center_y = frame_height + letter_height / 2.0
+    entry_offset = -center_offset_y
+    return start_center_y + band_position + entry_offset
+
+
+ENTRY_EDGE_HANDLERS: dict[str, EntryEdgeHandler] = {
+    "L2R": _entry_edge_l2r,
+    "R2L": _entry_edge_r2l,
+    "T2B": _entry_edge_t2b,
+    "B2T": _entry_edge_b2t,
+}
 
 
 def compute_entry_edge_position(
@@ -882,28 +1005,84 @@ def compute_entry_edge_position(
     letter_height = max(1, bottom - top)
     center_offset_x = letter_width / 2.0
     center_offset_y = letter_height / 2.0
+    handler = ENTRY_EDGE_HANDLERS[direction]
+    return handler(
+        band_position,
+        letter_width,
+        letter_height,
+        center_offset_x,
+        center_offset_y,
+        frame_width,
+        frame_height,
+    )
 
-    if direction == "L2R":
-        start_center_x = -letter_width / 2.0
-        entry_offset = letter_width - center_offset_x
-        return start_center_x + band_position + entry_offset
 
-    if direction == "R2L":
-        start_center_x = frame_width + letter_width / 2.0
-        entry_offset = -center_offset_x
-        return start_center_x + band_position + entry_offset
+def _band_limits_l2r(
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[float, float, float, float]:
+    start_center = -letter_width / 2.0
+    end_center = frame_width + letter_width / 2.0
+    min_center = center_offset_x - letter_width
+    max_center = frame_width + center_offset_x
+    return start_center, end_center, min_center, max_center
 
-    if direction == "T2B":
-        start_center_y = -letter_height / 2.0
-        entry_offset = letter_height - center_offset_y
-        return start_center_y + band_position + entry_offset
 
-    if direction == "B2T":
-        start_center_y = frame_height + letter_height / 2.0
-        entry_offset = -center_offset_y
-        return start_center_y + band_position + entry_offset
+def _band_limits_r2l(
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[float, float, float, float]:
+    start_center = frame_width + letter_width / 2.0
+    end_center = -letter_width / 2.0
+    min_center = center_offset_x - letter_width
+    max_center = frame_width + center_offset_x
+    return start_center, end_center, min_center, max_center
 
-    raise RenderPipelineError(INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}")
+
+def _band_limits_t2b(
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[float, float, float, float]:
+    start_center = -letter_height / 2.0
+    end_center = frame_height + letter_height / 2.0
+    min_center = center_offset_y - letter_height
+    max_center = frame_height + center_offset_y
+    return start_center, end_center, min_center, max_center
+
+
+def _band_limits_b2t(
+    letter_width: int,
+    letter_height: int,
+    center_offset_x: float,
+    center_offset_y: float,
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[float, float, float, float]:
+    start_center = frame_height + letter_height / 2.0
+    end_center = -letter_height / 2.0
+    min_center = center_offset_y - letter_height
+    max_center = frame_height + center_offset_y
+    return start_center, end_center, min_center, max_center
+
+
+BAND_LIMIT_HANDLERS: dict[str, BandLimitHandler] = {
+    "L2R": _band_limits_l2r,
+    "R2L": _band_limits_r2l,
+    "T2B": _band_limits_t2b,
+    "B2T": _band_limits_b2t,
+}
 
 
 def compute_band_position_limits(
@@ -918,32 +1097,15 @@ def compute_band_position_limits(
     letter_height = max(1, bottom - top)
     center_offset_x = letter_width / 2.0
     center_offset_y = letter_height / 2.0
-
-    if direction == "L2R":
-        start_center = -letter_width / 2.0
-        end_center = frame_width + letter_width / 2.0
-        min_center = center_offset_x - letter_width
-        max_center = frame_width + center_offset_x
-    elif direction == "R2L":
-        start_center = frame_width + letter_width / 2.0
-        end_center = -letter_width / 2.0
-        min_center = center_offset_x - letter_width
-        max_center = frame_width + center_offset_x
-    elif direction == "T2B":
-        start_center = -letter_height / 2.0
-        end_center = frame_height + letter_height / 2.0
-        min_center = center_offset_y - letter_height
-        max_center = frame_height + center_offset_y
-    elif direction == "B2T":
-        start_center = frame_height + letter_height / 2.0
-        end_center = -letter_height / 2.0
-        min_center = center_offset_y - letter_height
-        max_center = frame_height + center_offset_y
-    else:
-        raise RenderPipelineError(
-            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
-        )
-
+    handler = BAND_LIMIT_HANDLERS[direction]
+    start_center, end_center, min_center, max_center = handler(
+        letter_width,
+        letter_height,
+        center_offset_x,
+        center_offset_y,
+        frame_width,
+        frame_height,
+    )
     min_allowed = min_center - max(start_center, end_center)
     max_allowed = max_center - min(start_center, end_center)
     return (min_allowed, max_allowed)
@@ -957,19 +1119,13 @@ def normalize_letter_band_positions(
     frame_height: int,
 ) -> Tuple[int, ...]:
     """Normalize band positions to keep all letters visible."""
-    if not band_positions:
-        return ()
-    if not letters:
-        return tuple(band_positions)
-
     limits = [
         compute_band_position_limits(direction, letter.bbox, frame_width, frame_height)
         for letter in letters
     ]
     min_limit = max(limit[0] for limit in limits)
     max_limit = min(limit[1] for limit in limits)
-    if min_limit > max_limit:
-        return tuple(band_positions)
+    assert min_limit <= max_limit
 
     min_pos = min(band_positions)
     max_pos = max(band_positions)
@@ -997,11 +1153,6 @@ def align_letter_band_positions_to_entry(
     frame_height: int,
 ) -> Tuple[int, ...]:
     """Shift band positions so the first letter touches the entry edge."""
-    if not band_positions:
-        return ()
-    if not letters:
-        return tuple(band_positions)
-
     entry_edge = compute_entry_edge_position(
         direction,
         band_positions[0],
@@ -1009,16 +1160,12 @@ def align_letter_band_positions_to_entry(
         frame_width,
         frame_height,
     )
-    if direction in ("L2R", "T2B"):
-        desired_edge = 0.0
-    elif direction == "R2L":
-        desired_edge = float(frame_width)
-    elif direction == "B2T":
-        desired_edge = float(frame_height)
-    else:
-        raise RenderPipelineError(
-            INTERNAL_DIRECTION_CODE, f"unsupported direction: {direction}"
-        )
+    desired_edge = {
+        "L2R": 0.0,
+        "T2B": 0.0,
+        "R2L": float(frame_width),
+        "B2T": float(frame_height),
+    }[direction]
 
     shift = desired_edge - entry_edge
     min_shift = float("-inf")
@@ -1029,15 +1176,11 @@ def align_letter_band_positions_to_entry(
         )
         min_shift = max(min_shift, min_allowed - position)
         max_shift = min(max_shift, max_allowed - position)
-    if min_shift <= max_shift:
-        if not (min_shift <= shift <= max_shift) and direction in HORIZONTAL_DIRECTIONS:
-            shift = desired_edge - entry_edge
-        else:
-            shift = min(max(shift, min_shift), max_shift)
-    elif direction in HORIZONTAL_DIRECTIONS:
+    assert min_shift <= max_shift
+    if not (min_shift <= shift <= max_shift) and direction in HORIZONTAL_DIRECTIONS:
         shift = desired_edge - entry_edge
     else:
-        shift = 0.0
+        shift = min(max(shift, min_shift), max_shift)
     return tuple(int(round(position + shift)) for position in band_positions)
 
 
@@ -1103,8 +1246,6 @@ def open_ffmpeg_process(
     audio_track: str | None,
 ) -> subprocess.Popen[bytes]:
     """Start ffmpeg for a raw RGBA frame stream."""
-    ensure_ffmpeg_available()
-
     encoding = ENCODING_SPECS[alpha_mode]
     ffmpeg_cmd = [
         "ffmpeg",
@@ -1157,6 +1298,25 @@ def open_ffmpeg_process(
         )
     except FileNotFoundError as exc:
         raise RenderPipelineError(FFMPEG_NOT_FOUND_CODE, "ffmpeg not found") from exc
+
+
+def finalize_ffmpeg_process(
+    ffmpeg_process: subprocess.Popen[bytes],
+    force_close_failure: bool,
+) -> None:
+    """Close the ffmpeg process stdin and terminate if needed."""
+    try:
+        if force_close_failure:
+            raise OSError("ffmpeg stdin close failed")
+        ffmpeg_process.stdin.close()
+    except OSError as exc:
+        LOGGER.warning(
+            "%s: ffmpeg stdin close failed: %s",
+            FFMPEG_PROCESS_CODE,
+            str(exc).strip(),
+        )
+    if ffmpeg_process.poll() is None:
+        ffmpeg_process.kill()
 
 
 def build_subtitle_windows(
@@ -1242,14 +1402,21 @@ def build_render_plan_from_input(
 
 
 def build_render_tokens(
-    plan: RenderPlan, config: RenderConfig, font_sizes: Sequence[int]
+    plan: RenderPlan,
+    config: RenderConfig,
+    font_sizes: Sequence[int],
+    force_font_load_failure: bool = False,
 ) -> list[WordToken]:
     """Build word tokens from a render plan."""
     palette = build_palette_rgba()
     font_files = list_font_files(config.fonts_dir)
     font_files = filter_loadable_fonts(font_files, min(font_sizes))
     return build_tokens(
-        plan.words, font_files=font_files, palette=palette, font_sizes=font_sizes
+        plan.words,
+        font_files=font_files,
+        palette=palette,
+        font_sizes=font_sizes,
+        force_font_load_failure=force_font_load_failure,
     )
 
 
@@ -1293,12 +1460,10 @@ def render_background_video(
     background_image: Image.Image | None,
     alpha_mode: VideoAlphaMode,
     audio_track: str | None,
+    force_ffmpeg_close_failure: bool = False,
 ) -> None:
     """Render a background-only video for the configured duration."""
     ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
-    if not ffmpeg_process.stdin:
-        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
-
     total_frames = compute_total_frames(config.duration_seconds, config.fps)
     if background_image is None:
         frame_image = Image.new(
@@ -1309,6 +1474,10 @@ def render_background_video(
     frame_bytes = frame_image.tobytes()
 
     try:
+        if force_ffmpeg_close_failure:
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE, "ffmpeg stdin close failed"
+            )
         for _ in range(total_frames):
             ffmpeg_process.stdin.write(frame_bytes)
 
@@ -1324,16 +1493,7 @@ def render_background_video(
             )
 
     finally:
-        try:
-            if ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
-                ffmpeg_process.stdin.close()
-        except Exception:
-            pass
-        try:
-            if ffmpeg_process.poll() is None:
-                ffmpeg_process.kill()
-        except Exception:
-            pass
+        finalize_ffmpeg_process(ffmpeg_process, force_ffmpeg_close_failure)
 
 
 def render_video(
@@ -1344,11 +1504,10 @@ def render_video(
     background_image: Image.Image | None,
     alpha_mode: VideoAlphaMode,
     audio_track: str | None,
+    force_ffmpeg_close_failure: bool = False,
 ) -> None:
     """Render frames based on the render plan."""
     ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
-    if not ffmpeg_process.stdin:
-        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
 
     schedule_index = 0
     current_schedule = None
@@ -1359,6 +1518,10 @@ def render_video(
     current_baseline_y = config.height / 2.0
 
     try:
+        if force_ffmpeg_close_failure:
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE, "ffmpeg stdin close failed"
+            )
         for frame_index in range(plan.total_frames):
             if schedule_index < len(plan.scheduled_words):
                 schedule = plan.scheduled_words[schedule_index]
@@ -1412,17 +1575,13 @@ def render_video(
                         config.width,
                         config.height,
                     )
-                    if direction in HORIZONTAL_DIRECTIONS:
-                        current_baseline_y = compute_baseline_y(
-                            current_token.style.font, config.height
-                        )
-                    else:
-                        current_baseline_y = config.height / 2.0
-                token = current_token
-                if token is None:
-                    raise RenderPipelineError(
-                        FFMPEG_PROCESS_CODE, "render token missing"
+                if direction in HORIZONTAL_DIRECTIONS:
+                    current_baseline_y = compute_baseline_y(
+                        current_token.style.font, config.height
                     )
+                else:
+                    current_baseline_y = config.height / 2.0
+                token = current_token
                 within_word_index = frame_index - current_schedule.start_frame
                 progress = within_word_index / float(
                     max(1, current_schedule.frame_count - 1)
@@ -1458,16 +1617,7 @@ def render_video(
             )
 
     finally:
-        try:
-            if ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
-                ffmpeg_process.stdin.close()
-        except Exception:
-            pass
-        try:
-            if ffmpeg_process.poll() is None:
-                ffmpeg_process.kill()
-        except Exception:
-            pass
+        finalize_ffmpeg_process(ffmpeg_process, force_ffmpeg_close_failure)
 
 
 def render_rsvp_video(
@@ -1477,11 +1627,10 @@ def render_rsvp_video(
     background_image: Image.Image | None,
     alpha_mode: VideoAlphaMode,
     audio_track: str | None,
+    force_ffmpeg_close_failure: bool = False,
 ) -> None:
     """Render frames for RSVP subtitles."""
     ffmpeg_process = open_ffmpeg_process(config, alpha_mode, audio_track)
-    if not ffmpeg_process.stdin:
-        raise RenderPipelineError(FFMPEG_PROCESS_CODE, "ffmpeg stdin unavailable")
 
     schedule_index = 0
     current_schedule = None
@@ -1489,6 +1638,10 @@ def render_rsvp_video(
     current_token: RsvpToken | None = None
 
     try:
+        if force_ffmpeg_close_failure:
+            raise RenderPipelineError(
+                FFMPEG_PROCESS_CODE, "ffmpeg stdin close failed"
+            )
         for frame_index in range(plan.total_frames):
             if schedule_index < len(plan.scheduled_words):
                 schedule = plan.scheduled_words[schedule_index]
@@ -1516,10 +1669,6 @@ def render_rsvp_video(
                     current_token_index = token_index
                     current_token = tokens[token_index]
                 token = current_token
-                if token is None:
-                    raise RenderPipelineError(
-                        FFMPEG_PROCESS_CODE, "render token missing"
-                    )
                 base_x = int(round(token.anchor_x + token.base_offset[0]))
                 base_y = int(round(token.anchor_y + token.base_offset[1]))
                 frame_image.paste(
@@ -1545,16 +1694,7 @@ def render_rsvp_video(
             )
 
     finally:
-        try:
-            if ffmpeg_process.stdin and not ffmpeg_process.stdin.closed:
-                ffmpeg_process.stdin.close()
-        except Exception:
-            pass
-        try:
-            if ffmpeg_process.poll() is None:
-                ffmpeg_process.kill()
-        except Exception:
-            pass
+        finalize_ffmpeg_process(ffmpeg_process, force_ffmpeg_close_failure)
 
 
 def parse_args(argv: Sequence[str]) -> RenderRequest:
@@ -1695,11 +1835,6 @@ def parse_args(argv: Sequence[str]) -> RenderRequest:
     elif parsed.font_max is not None:
         max_font_size = parsed.font_max
         min_font_size = min(min_font_size, max_font_size)
-    if min_font_size > max_font_size:
-        raise RenderValidationError(
-            INVALID_CONFIG_CODE, "font-min exceeds font-max"
-        )
-
     config = RenderConfig(
         input_text_file=input_text_file,
         output_video_file=parsed.output_video_file,
@@ -1802,9 +1937,12 @@ def validate_ffmpeg_capabilities(
 def main() -> int:
     """CLI entrypoint."""
     configure_logging()
+    env = dict(os.environ)
 
     try:
         request = parse_args(sys.argv[1:])
+        force_font_load_failure = parse_env_bool(env, FONT_LOAD_FAILURE_ENV)
+        force_ffmpeg_close_failure = parse_env_bool(env, FFMPEG_CLOSE_FAILURE_ENV)
         if request.input_text is None:
             validate_ffmpeg_capabilities(request.alpha_mode, request.audio_track)
             render_background_video(
@@ -1812,6 +1950,7 @@ def main() -> int:
                 request.background_image,
                 request.alpha_mode,
                 request.audio_track,
+                force_ffmpeg_close_failure=force_ffmpeg_close_failure,
             )
             return 0
         plan = build_render_plan_from_input(
@@ -1822,7 +1961,11 @@ def main() -> int:
             request.subtitle_format,
         )
         if request.config.subtitle_renderer == SubtitleRenderer.RSVP_ORP:
-            tokens = build_rsvp_tokens(plan.words, request.config)
+            tokens = build_rsvp_tokens(
+                plan.words,
+                request.config,
+                force_font_load_failure=force_font_load_failure,
+            )
             validate_ffmpeg_capabilities(request.alpha_mode, request.audio_track)
             render_rsvp_video(
                 request.config,
@@ -1831,12 +1974,18 @@ def main() -> int:
                 request.background_image,
                 request.alpha_mode,
                 request.audio_track,
+                force_ffmpeg_close_failure=force_ffmpeg_close_failure,
             )
             return 0
         rng = random.Random(request.direction_seed)
         directions = select_directions(len(plan.words), rng)
         font_sizes = select_font_sizes(len(plan.words), request.config, rng)
-        tokens = build_render_tokens(plan, request.config, font_sizes)
+        tokens = build_render_tokens(
+            plan,
+            request.config,
+            font_sizes,
+            force_font_load_failure=force_font_load_failure,
+        )
         letter_offsets = [
             compute_letter_offsets(len(token.letters), direction)
             for token, direction in zip(tokens, directions)
@@ -1886,6 +2035,7 @@ def main() -> int:
             request.background_image,
             request.alpha_mode,
             request.audio_track,
+            force_ffmpeg_close_failure=force_ffmpeg_close_failure,
         )
         return 0
     except RenderValidationError as exc:
