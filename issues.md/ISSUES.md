@@ -259,3 +259,5 @@ proceed
 - [x] [I132] Wire pytest-cov into make ci with subprocess coverage capture and a coverage gate. Resolved with coverage config, subprocess hook, Python-based CLI invocation in tests, and CI coverage reporting/gating.
 - [ ] [I133] Raise CI coverage gate to 100% by expanding integration coverage for audio_to_text, audio_to_text_backend, and render_text_video.
 - [x] [I133] Raise CI coverage gate to 100% by expanding integration coverage for audio_to_text, audio_to_text_backend, and render_text_video. Resolved with expanded integration coverage, refreshed TLS fixtures, and a 100% coverage gate in `make ci`.
+- [ ] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits.
+- [x] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits. Resolved by marking gRPC/backend scripts executable for volume-mounted dev runs.
