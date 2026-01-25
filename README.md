@@ -285,7 +285,7 @@ Jobs are stored under `data/audio_to_text_backend` (persisted via the `data/` bi
 
 ### `audio_to_text_ui`
 
-Standalone browser UI served from `audio_to_text_ui/`. Configure the backend URL via `AUDIO_TO_TEXT_UI_BACKEND_URL` (or edit `audio_to_text_ui/config.js` for static hosting).
+Standalone browser UI assets live in `audio_to_text_ui/`. Update `audio_to_text_ui/config.js` to override the backend URL; otherwise the UI defaults to the current host.
 
 **Docker (Linux, full stack)**
 
@@ -293,11 +293,10 @@ Create the shared env files:
 
 ```shell
 cp .env.audio_to_text_backend.example .env.audio_to_text_backend
-cp .env.audio_to_text_ui.example .env.audio_to_text_ui
 cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 ```
 
-Development (bind-mounts the repo for local changes):
+Development (bind-mounts the repo for local changes). The UI is served by the gHTTP image pulled from GHCR (no local build for the UI container):
 
 Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only).
 
@@ -306,7 +305,7 @@ COMPOSE_PROFILES=stack docker compose -f docker/docker-compose.yml up --build
 ```
 
 The gRPC aligner caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` on the host.
-If you open the UI from another device, set `AUDIO_TO_TEXT_UI_BACKEND_URL` in `.env.audio_to_text_ui` to `http://<host-ip>:8080` or leave it unset to use the current host.
+If you open the UI from another device and need to point to a different backend, edit `audio_to_text_ui/config.js` to set `window.__AUDIO_TO_TEXT_CONFIG__.backendUrl`.
 
 ---
 

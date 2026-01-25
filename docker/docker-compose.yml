@@ -2,15 +2,12 @@ services:
   audio_to_text_ui:
     profiles:
       - stack
-    build:
-      context: ..
-      dockerfile: docker/audio_to_text_ui/Dockerfile.dev
-    env_file:
-      - ../.env.audio_to_text_ui
+    image: ghcr.io/tyemirov/ghttp:latest
     ports:
       - "7860:7860"
     volumes:
-      - ../audio_to_text_ui:/app/audio_to_text_ui
+      - ../audio_to_text_ui:/data:ro
+    command: ["--bind", "0.0.0.0", "--directory", "/data", "7860"]
     depends_on:
       - audio_to_text_backend
 

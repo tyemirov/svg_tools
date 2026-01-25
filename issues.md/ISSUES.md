@@ -270,3 +270,4 @@ proceed
 - [x] [M407] Remove legacy audio_to_text stack artifacts and compatibility flags. Resolved by dropping the legacy docker service/env files, removing compatibility docs, and simplifying the render_text_video punctuation flag to a single keep override.
 - [x] [B338] Surface alignment failure details in gRPC logs and classify missing-timestamp alignment errors from whisperx with `audio_to_text.align.missing_timestamps`.
 - [x] [B339] Allow SSE access from non-localhost UI by default and assert SSE CORS headers in integration tests.
+- [x] [B340] Serve the UI via the gHTTP GHCR image in Docker Compose and update the docs to drop local UI builds.
