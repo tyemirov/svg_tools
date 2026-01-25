@@ -271,3 +271,4 @@ proceed
 - [x] [B338] Surface alignment failure details in gRPC logs and classify missing-timestamp alignment errors from whisperx with `audio_to_text.align.missing_timestamps`.
 - [x] [B339] Allow SSE access from non-localhost UI by default and assert SSE CORS headers in integration tests.
 - [x] [B340] Serve the UI via the gHTTP GHCR image in Docker Compose and update the docs to drop local UI builds.
+- [x] [B341] Ignore `data/` in git to avoid untracked artifact noise.

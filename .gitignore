@@ -1,6 +1,7 @@
 .idea
 .DS_Store
 assets/
+data/
 data/inputs
 data/hf-cache/
 /OpenSans-*.ttf
