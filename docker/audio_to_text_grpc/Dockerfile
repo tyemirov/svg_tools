@@ -10,7 +10,7 @@ COPY audio_to_text_grpc.py /app/audio_to_text_grpc.py
 COPY audio_to_text_grpc /app/audio_to_text_grpc
 RUN uv run --no-project /app/audio_to_text.py --help >/dev/null \
   && uv run --no-project /app/audio_to_text_grpc.py --help >/dev/null \
-  && find /root/.cache/uv -type f -name 'libctranslate2*.so*' -exec patchelf --clear-execstack {} +
+  && find /root/.cache/uv -type f -name 'libctranslate2*.so*' -exec patchelf --clear-execstack '{}' ';'
 
 FROM python:3.12-slim
 
