@@ -272,3 +272,4 @@ proceed
 - [x] [B339] Allow SSE access from non-localhost UI by default and assert SSE CORS headers in integration tests.
 - [x] [B340] Serve the UI via the gHTTP GHCR image in Docker Compose and update the docs to drop local UI builds.
 - [x] [B341] Ignore `data/` in git to avoid untracked artifact noise.
+- [x] [B342] Fix ctranslate2 exec-stack import failures in the gRPC Docker images by clearing the executable stack requirement during build.
