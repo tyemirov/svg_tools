@@ -269,3 +269,4 @@ proceed
 - [x] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host. Resolved with dynamic backend URL resolution and updated docs/env defaults.
 - [x] [M407] Remove legacy audio_to_text stack artifacts and compatibility flags. Resolved by dropping the legacy docker service/env files, removing compatibility docs, and simplifying the render_text_video punctuation flag to a single keep override.
 - [x] [B338] Surface alignment failure details in gRPC logs and classify missing-timestamp alignment errors from whisperx with `audio_to_text.align.missing_timestamps`.
+- [x] [B339] Allow SSE access from non-localhost UI by default and assert SSE CORS headers in integration tests.

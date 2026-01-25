@@ -608,6 +608,7 @@ def test_audio_to_text_backend_sse_events(tmp_path: Path) -> None:
         backend_port,
         tmp_path / "backend-data",
         f"127.0.0.1:{grpc_port}",
+        extra_env={"AUDIO_TO_TEXT_BACKEND_ALLOWED_ORIGINS": "*"},
     )
     try:
         wait_for_port("127.0.0.1", grpc_port, timeout_seconds=5)
@@ -632,7 +633,10 @@ def test_audio_to_text_backend_sse_events(tmp_path: Path) -> None:
         )
         with urlopen(request, timeout=5):
             pass
-        with urlopen(f"{base_url}/api/jobs/events", timeout=5) as response:
+        sse_request = Request(f"{base_url}/api/jobs/events", headers={"Origin": "https://ui.test"})
+        with urlopen(sse_request, timeout=5) as response:
+            assert response.headers.get("Access-Control-Allow-Origin") == "*"
+            assert response.headers.get("Content-Type") == "text/event-stream"
             line = response.readline().decode("utf-8").strip()
         assert line.startswith("data:")
     finally:
