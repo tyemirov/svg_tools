@@ -265,3 +265,5 @@ proceed
 - [x] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`. Resolved by removing empty TLS entries from the example env file.
 - [ ] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage.
 - [x] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage. Resolved with a unified compose file and updated docs.
+- [ ] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host.
+- [x] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host. Resolved with dynamic backend URL resolution and updated docs/env defaults.

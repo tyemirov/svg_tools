@@ -308,6 +308,7 @@ COMPOSE_PROFILES=stack docker compose -f docker/docker-compose.yml up --build
 ```
 
 The gRPC aligner caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` on the host.
+If you open the UI from another device, set `AUDIO_TO_TEXT_UI_BACKEND_URL` in `.env.audio_to_text_ui` to `http://<host-ip>:8080` or leave it unset to use the current host.
 
 ---
 
