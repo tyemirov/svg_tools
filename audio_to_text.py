@@ -1193,8 +1193,10 @@ def align_words(
             return_char_alignments=False,
         )
     except Exception as exc:
+        error_message = str(exc)
+        error_code = ALIGNMENT_TIMESTAMP_CODE if "missing timestamps" in error_message else ALIGNMENT_CODE
         raise AlignmentPipelineError(
-            ALIGNMENT_CODE, f"alignment failed: {exc}"
+            error_code, f"alignment failed: {error_message}"
         ) from exc
 
     return extract_aligned_words(
