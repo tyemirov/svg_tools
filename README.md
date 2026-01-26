@@ -213,7 +213,6 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
     [--fonts-dir <PATH>] \
     [--audio-track <PATH>] \
     [--direction-seed <INT>] \
-    [--remove-punctuation] \
     [--keep-punctuation] \
     [--subtitle-renderer <motion|criss_cross|rsvp_orp>] \
     [--font-min <INT>] \
@@ -230,7 +229,6 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
 * Punctuation is stripped by default; use `--keep-punctuation` to preserve punctuation.
-* `--remove-punctuation` is accepted for compatibility but matches the default behavior.
 * RSVP punctuation pauses only apply when punctuation is preserved.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT/SBV input (single word at a time with ORP anchoring).
@@ -287,7 +285,7 @@ Jobs are stored under `data/audio_to_text_backend` (persisted via the `data/` bi
 
 ### `audio_to_text_ui`
 
-Standalone browser UI served from `audio_to_text_ui/`. Configure the backend URL via `AUDIO_TO_TEXT_UI_BACKEND_URL` (or edit `audio_to_text_ui/config.js` for static hosting).
+Standalone browser UI assets live in `audio_to_text_ui/`. Update `audio_to_text_ui/config.js` to override the backend URL; otherwise the UI defaults to the current host.
 
 **Docker (Linux, full stack)**
 
@@ -295,19 +293,19 @@ Create the shared env files:
 
 ```shell
 cp .env.audio_to_text_backend.example .env.audio_to_text_backend
-cp .env.audio_to_text_ui.example .env.audio_to_text_ui
 cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 ```
 
-Development (bind-mounts the repo for local changes):
+Development (bind-mounts the repo for local changes). The UI is served by the gHTTP image pulled from GHCR (no local build for the UI container):
 
-Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only), `legacy` (single-process UI).
+Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only).
 
 ```shell
 COMPOSE_PROFILES=stack docker compose -f docker/docker-compose.yml up --build
 ```
 
 The gRPC aligner caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` on the host.
+If you open the UI from another device and need to point to a different backend, edit `audio_to_text_ui/config.js` to set `window.__AUDIO_TO_TEXT_CONFIG__.backendUrl`.
 
 ---
 
