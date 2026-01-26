@@ -79,7 +79,7 @@
             <span class="jobs-count" x-text="jobCount"></span>
           </div>
           <div class="job-list">
-            <template x-for="job in sortedJobs()" :key="job.job_id">
+            <template x-for="job in sortedJobs()" :key="job.ui_id">
               <article class="job-card">
                 <header class="job-header">
                   <div class="job-title" x-text="jobTitle(job)"></div>

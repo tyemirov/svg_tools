@@ -132,6 +132,14 @@ def write_stub_modules(stub_root: Path) -> None:
                 "    mode = os.environ.get(\"AUDIO_TO_TEXT_GRPC_STUB_MODE\", \"ok\")",
                 "    if mode == \"invalid\":",
                 "        return {\"segments\": [{\"words\": [{\"word\": \"\", \"start\": 0.0, \"end\": 0.1}]}]}",
+                "    if mode == \"punctuation\":",
+                "        words = [",
+                "            {\"word\": \"!!!\", \"start\": 0.0, \"end\": 0.1},",
+                "            {\"word\": \"★\", \"start\": None, \"end\": None},",
+                "            {\"word\": \"★\", \"start\": 0.1, \"end\": 0.2},",
+                "            {\"word\": \"hello\", \"start\": 0.2, \"end\": 0.3},",
+                "        ]",
+                "        return {\"segments\": [{\"words\": words}]}",
                 "    transcript = segments[0].get(\"text\", \"\") if segments else \"\"",
                 "    tokens = [token for token in transcript.split() if token]",
                 "    if not tokens:",
@@ -1052,6 +1060,37 @@ def test_audio_to_text_grpc_inprocess_alignment_with_stubs(tmp_path: Path) -> No
             stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert [word.text for word in response.words] == ["hello", "world"]
+    finally:
+        stop_process(process)
+
+
+def test_audio_to_text_grpc_inprocess_alignment_drops_punctuation(
+    tmp_path: Path,
+) -> None:
+    """Drop punctuation tokens when remove-punctuation is active."""
+    repo_root = Path(__file__).resolve().parents[1]
+    port = free_local_port()
+    stub_root = tmp_path / "stubs"
+    write_stub_modules(stub_root)
+    process = start_server(
+        repo_root,
+        port,
+        extra_env={
+            "PYTHONPATH": f"{stub_root}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+            "AUDIO_TO_TEXT_GRPC_STUB_MODE": "punctuation",
+            "AUDIO_TO_TEXT_GRPC_TEST_MODE": "0",
+        },
+        test_mode=False,
+    )
+    try:
+        wait_for_port("127.0.0.1", port, timeout_seconds=5)
+        wav_bytes = build_silent_wav_bytes(0.2)
+        init = audio_to_text_grpc_pb2.AlignInit(transcript="Hello!!!")
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            response = stub.Align(stream_request(init, wav_bytes))
+        assert [word.text for word in response.words] == ["hello"]
+        assert response.srt
     finally:
         stop_process(process)
 
