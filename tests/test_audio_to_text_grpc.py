@@ -623,14 +623,14 @@ def test_audio_to_text_grpc_inflight_limit(tmp_path: Path) -> None:
         wav_bytes = build_silent_wav_bytes(0.2)
         init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
 
-        def call_align() -> grpc.StatusCode | None:
+        def call_align() -> grpc.StatusCode:
             with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
                 stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
                 try:
                     stub.Align(stream_request(init, wav_bytes))
+                    return grpc.StatusCode.OK
                 except grpc.RpcError as exc:
                     return exc.code()
-            return None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             first_future = executor.submit(call_align)
@@ -639,10 +639,10 @@ def test_audio_to_text_grpc_inflight_limit(tmp_path: Path) -> None:
             first_result = first_future.result()
             second_result = second_future.result()
 
-        assert (
-            first_result == grpc.StatusCode.RESOURCE_EXHAUSTED
-            or second_result == grpc.StatusCode.RESOURCE_EXHAUSTED
-        )
+        assert grpc.StatusCode.RESOURCE_EXHAUSTED in (first_result, second_result)
+        assert grpc.StatusCode.INTERNAL not in (first_result, second_result)
+        third_result = call_align()
+        assert third_result == grpc.StatusCode.OK
     finally:
         stop_process(process)
 
