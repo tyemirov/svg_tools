@@ -633,6 +633,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         request_id = uuid.uuid4().hex
         start_time = self._clock()
         success = False
+        request_language = "unknown"
+        request_audio_filename = "unknown"
+        request_remove_punctuation = False
         try:
             self._metrics.record_start()
             self._authorize(context)
@@ -641,6 +644,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                 request = collect_request(
                     request_iterator, self._config, context, temp_root
                 )
+                request_language = request.language
+                request_audio_filename = request.audio_filename
+                request_remove_punctuation = request.remove_punctuation
                 self._metrics.record_bytes(request.audio_bytes)
                 LOGGER.info(
                     "audio_to_text_grpc.request.started id=%s bytes=%s language=%s",
@@ -668,17 +674,22 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
             )
         except GrpcRequestError as exc:
             LOGGER.warning(
-                "audio_to_text_grpc.request.failed id=%s code=%s status=%s",
+                "audio_to_text_grpc.request.failed id=%s code=%s status=%s error=%s",
                 request_id,
                 exc.code,
                 exc.status.name,
+                str(exc),
             )
             context.abort(exc.status, f"{exc.code}: {exc}")
         except audio_to_text.AlignmentPipelineError as exc:
             LOGGER.error(
-                "audio_to_text_grpc.request.error id=%s code=%s",
+                "audio_to_text_grpc.request.error id=%s code=%s error=%s language=%s audio=%s remove_punctuation=%s",
                 request_id,
                 exc.code,
+                str(exc),
+                request_language,
+                request_audio_filename,
+                request_remove_punctuation,
             )
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"{exc.code}: {exc}")
         except Exception as exc:

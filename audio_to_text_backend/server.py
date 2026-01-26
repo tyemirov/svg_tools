@@ -456,6 +456,7 @@ def build_job_payload(job: audio_to_text.AlignmentJob) -> dict[str, object]:
         "text_filename": job.job_input.text_filename,
         "language": job.job_input.language,
         "remove_punctuation": job.job_input.remove_punctuation,
+        "client_job_id": job.job_input.client_job_id,
         "created_at": job.created_at,
         "started_at": job.result.started_at,
         "completed_at": job.result.completed_at,
@@ -561,6 +562,8 @@ def serve(config: BackendConfig) -> None:
     class BackendHandler(BaseHTTPRequestHandler):
         """HTTP request handler for the backend service."""
 
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, format: str, *args: object) -> None:
             LOGGER.info("%s - %s", self.client_address[0], format % args)
 
@@ -589,17 +592,27 @@ def serve(config: BackendConfig) -> None:
         def send_sse_headers(self) -> None:
             self.send_response(HTTPStatus.OK)
             self.send_cors_headers()
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header(
+                "Content-Type", "text/event-stream; charset=utf-8"
+            )
+            self.send_header("Cache-Control", "no-cache, no-transform")
             self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
+            self.wfile.flush()
+            self.close_connection = False
 
         def send_sse_event(
             self,
             payload: dict[str, object],
             event_kind: str | None = None,
+            event_id: int | None = None,
         ) -> bool:
-            body = f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+            lines: list[str] = []
+            if event_id is not None:
+                lines.append(f"id: {event_id}")
+            lines.append(f"data: {json.dumps(payload)}")
+            body = f"{'\n'.join(lines)}\n\n".encode("utf-8")
             try:
                 if event_kind is not None and event_kind == config.sse_failure_mode:
                     raise OSError("sse event failure")
@@ -610,16 +623,17 @@ def serve(config: BackendConfig) -> None:
                 return False
             return True
 
-        def send_sse_keepalive(self, event_kind: str | None = None) -> bool:
-            try:
-                if event_kind is not None and event_kind == config.sse_failure_mode:
-                    raise OSError("sse keepalive failure")
-                self.wfile.write(b": keepalive\n\n")
-                self.wfile.flush()
-            except OSError:
-                self.close_connection = True
-                return False
-            return True
+        def send_sse_keepalive(
+            self,
+            event_kind: str | None = None,
+            event_id: int | None = None,
+        ) -> bool:
+            payload = {"type": "keepalive"}
+            return self.send_sse_event(
+                payload,
+                event_kind=event_kind,
+                event_id=event_id,
+            )
 
         def parse_job_id(self, path: str, suffix: str | None = None) -> str | None:
             prefix = "/api/jobs/"
@@ -661,6 +675,7 @@ def serve(config: BackendConfig) -> None:
                         "jobs": [build_job_payload(job) for job in jobs],
                     },
                     event_kind=SSE_FAILURE_SNAPSHOT,
+                    event_id=change_id,
                 ):
                     return
                 while not shutdown_event.is_set():
@@ -669,7 +684,7 @@ def serve(config: BackendConfig) -> None:
                     )
                     if next_change == change_id:
                         if not self.send_sse_keepalive(
-                            event_kind=SSE_FAILURE_KEEPALIVE
+                            event_kind=SSE_FAILURE_KEEPALIVE,
                         ):
                             return
                         continue
@@ -682,6 +697,7 @@ def serve(config: BackendConfig) -> None:
                             "jobs": [build_job_payload(job) for job in jobs],
                         },
                         event_kind=SSE_FAILURE_UPDATE,
+                        event_id=change_id,
                     ):
                         return
                 return
@@ -785,6 +801,7 @@ def serve(config: BackendConfig) -> None:
                 audio_path=str(raw_audio_path),
                 text_path=str(text_path),
                 output_path=str(output_path),
+                client_job_id=upload.client_job_id,
             )
             try:
                 job_dir.mkdir(parents=True, exist_ok=True)
