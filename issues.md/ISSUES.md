@@ -279,3 +279,5 @@ proceed
 - [x] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates. Resolved with stable UI job ids and payload validation in the UI list renderer.
 - [ ] [B345] Fix audio_to_text SSE stream stability so UI job status updates keep flowing.
 - [x] [B345] Fix audio_to_text SSE stream stability so UI job status updates keep flowing. Resolved with HTTP/1.1 SSE responses, keepalive data events, reconnect logic, and updated integration coverage.
+- [ ] [B346] Fix duplicate UI job cards by correlating optimistic jobs with backend updates.
+- [x] [B346] Fix duplicate UI job cards by correlating optimistic jobs with backend updates. Resolved with client job ids, UI reconciliation updates, and SSE integration coverage.

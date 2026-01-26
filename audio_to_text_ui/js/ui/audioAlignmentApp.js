@@ -242,6 +242,11 @@ export function AudioAlignmentApp() {
         }
         const uiId = typeof job.ui_id === "string" && job.ui_id ? job.ui_id : job.job_id;
         lookup.set(job.job_id, uiId);
+        const clientJobId =
+          typeof job.client_job_id === "string" && job.client_job_id ? job.client_job_id : null;
+        if (clientJobId) {
+          lookup.set(clientJobId, uiId);
+        }
       }
       return lookup;
     },
@@ -255,10 +260,19 @@ export function AudioAlignmentApp() {
         this.reportInvalidJob("job_id missing from payload");
         return null;
       }
+      const clientJobId =
+        typeof job.client_job_id === "string" && job.client_job_id ? job.client_job_id : null;
       const uiId =
         uiIdLookup.get(jobId) ||
+        (clientJobId ? uiIdLookup.get(clientJobId) : null) ||
         (typeof job.ui_id === "string" && job.ui_id ? job.ui_id : jobId);
-      return { ...job, job_id: jobId, ui_id: uiId, is_optimistic: false };
+      return {
+        ...job,
+        job_id: jobId,
+        client_job_id: clientJobId,
+        ui_id: uiId,
+        is_optimistic: false,
+      };
     },
     sortedJobs() {
       return [...this.jobs].sort((left, right) => {
@@ -281,6 +295,7 @@ export function AudioAlignmentApp() {
       return {
         ui_id: optimisticId,
         job_id: optimisticId,
+        client_job_id: optimisticId,
         status: "queued",
         message: UI_STRINGS.statusQueued,
         output_ready: false,
@@ -299,17 +314,32 @@ export function AudioAlignmentApp() {
       const merged = Array.isArray(jobs) ? jobs : [];
       const uiIdLookup = this.buildUiIdLookup();
       const normalized = [];
+      const incomingJobIds = new Set();
+      const incomingClientIds = new Set();
       for (const job of merged) {
         const normalizedJob = this.normalizeIncomingJob(job, uiIdLookup);
         if (normalizedJob) {
           normalized.push(normalizedJob);
+          incomingJobIds.add(normalizedJob.job_id);
+          if (normalizedJob.client_job_id) {
+            incomingClientIds.add(normalizedJob.client_job_id);
+          }
         }
       }
       const optimisticJobs = this.jobs.filter((job) => job && job.is_optimistic);
       const optimistic = optimisticJobs.filter(
-        (job) => !normalized.some((entry) => entry.job_id === job.job_id)
+        (job) =>
+          !incomingJobIds.has(job.job_id) &&
+          (!job.client_job_id || !incomingClientIds.has(job.client_job_id))
       );
       this.jobs = [...normalized, ...optimistic];
+      if (
+        this.pendingSubmission &&
+        this.pendingSubmission.client_job_id &&
+        incomingClientIds.has(this.pendingSubmission.client_job_id)
+      ) {
+        this.pendingSubmission = null;
+      }
     },
     applyJobUpdate(job) {
       const uiIdLookup = this.buildUiIdLookup();
@@ -338,21 +368,28 @@ export function AudioAlignmentApp() {
       if (job.job_id.startsWith("local_")) {
         return false;
       }
-      if (job.audio_filename !== this.pendingSubmission.audio_filename) {
-        return false;
-      }
-      if (job.text_filename !== this.pendingSubmission.text_filename) {
-        return false;
-      }
-      if (job.language !== this.pendingSubmission.language) {
-        return false;
-      }
-      if (Boolean(job.remove_punctuation) !== this.pendingSubmission.remove_punctuation) {
-        return false;
-      }
-      const createdAt = typeof job.created_at === "number" ? job.created_at : null;
-      if (createdAt !== null && Math.abs(createdAt - this.pendingSubmission.created_at_seconds) > 90) {
-        return false;
+      const pendingClientId = this.pendingSubmission.client_job_id;
+      if (pendingClientId && job.client_job_id) {
+        if (job.client_job_id !== pendingClientId) {
+          return false;
+        }
+      } else {
+        if (job.audio_filename !== this.pendingSubmission.audio_filename) {
+          return false;
+        }
+        if (job.text_filename !== this.pendingSubmission.text_filename) {
+          return false;
+        }
+        if (job.language !== this.pendingSubmission.language) {
+          return false;
+        }
+        if (Boolean(job.remove_punctuation) !== this.pendingSubmission.remove_punctuation) {
+          return false;
+        }
+        const createdAt = typeof job.created_at === "number" ? job.created_at : null;
+        if (createdAt !== null && Math.abs(createdAt - this.pendingSubmission.created_at_seconds) > 90) {
+          return false;
+        }
       }
       const optimisticId = this.pendingSubmission.optimistic_job_id;
       const index = this.jobs.findIndex((entry) => entry.job_id === optimisticId);
@@ -449,6 +486,7 @@ export function AudioAlignmentApp() {
       const optimisticJob = this.createOptimisticJob();
       this.pendingSubmission = {
         optimistic_job_id: optimisticJob.job_id,
+        client_job_id: optimisticJob.client_job_id,
         audio_filename: optimisticJob.audio_filename,
         text_filename: optimisticJob.text_filename,
         language: this.language,
@@ -461,6 +499,7 @@ export function AudioAlignmentApp() {
       formData.append("text", this.textFile, this.textFile.name);
       formData.append("language", this.language);
       formData.append("remove_punctuation", this.removePunctuation ? "1" : "0");
+      formData.append("client_job_id", optimisticJob.client_job_id);
       try {
         const payload = await this.backend.createJob(formData);
         if (payload && payload.job_id) {

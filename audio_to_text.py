@@ -235,6 +235,7 @@ class UploadForm:
     text: UploadFile
     language: str
     remove_punctuation: bool
+    client_job_id: str | None
 
 @dataclass(frozen=True)
 class AlignmentJobInput:
@@ -247,6 +248,7 @@ class AlignmentJobInput:
     audio_path: str
     text_path: str
     output_path: str
+    client_job_id: str | None
 
     def __post_init__(self) -> None:
         if not self.audio_filename.strip():
@@ -272,6 +274,10 @@ class AlignmentJobInput:
         if not self.output_path.strip():
             raise AlignmentPipelineError(
                 INVALID_JOB_INPUT_CODE, "output path is required"
+            )
+        if self.client_job_id is not None and not self.client_job_id.strip():
+            raise AlignmentPipelineError(
+                INVALID_JOB_INPUT_CODE, "client job id must be non-empty"
             )
 
 
@@ -443,6 +449,9 @@ def parse_alignment_job(job_id: str, payload: object) -> AlignmentJob:
     remove_punctuation = parse_job_bool(
         input_payload.get("remove_punctuation"), "remove_punctuation"
     )
+    client_job_id = parse_job_optional_string(
+        input_payload.get("client_job_id"), "client_job_id"
+    )
     job_input = AlignmentJobInput(
         audio_filename=parse_job_string(
             input_payload.get("audio_filename"), "audio_filename"
@@ -457,6 +466,7 @@ def parse_alignment_job(job_id: str, payload: object) -> AlignmentJob:
         output_path=parse_job_string(
             input_payload.get("output_path"), "output_path"
         ),
+        client_job_id=client_job_id,
     )
     job_result = AlignmentJobResult(
         status=parse_job_status(result_payload.get("status")),
@@ -490,6 +500,7 @@ def serialize_alignment_job(job: AlignmentJob) -> dict[str, object]:
             "audio_path": job.job_input.audio_path,
             "text_path": job.job_input.text_path,
             "output_path": job.job_input.output_path,
+            "client_job_id": job.job_input.client_job_id,
         },
         "result": {
             "status": job.result.status.value,
@@ -1052,7 +1063,13 @@ def parse_upload_form(
 ) -> UploadForm:
     """Parse the upload form into a structured payload."""
     message = parse_multipart_message(content_type, body)
-    allowed_fields = {"audio", "text", "language", "remove_punctuation"}
+    allowed_fields = {
+        "audio",
+        "text",
+        "language",
+        "remove_punctuation",
+        "client_job_id",
+    }
     fields: dict[str, str] = {}
     files: dict[str, UploadFile] = {}
     for part in message.iter_parts():
@@ -1085,6 +1102,11 @@ def parse_upload_form(
     text = require_upload(files, "text")
     language_raw = require_form_field(fields, "language")
     remove_punctuation_raw = require_form_field(fields, "remove_punctuation")
+    client_job_id_raw = fields.get("client_job_id")
+    if client_job_id_raw is not None and not client_job_id_raw.strip():
+        raise AlignmentValidationError(
+            UI_UPLOAD_CODE, "client_job_id must be non-empty"
+        )
     if not language_raw.strip():
         raise AlignmentValidationError(
             UI_UPLOAD_CODE, "language must be provided"
@@ -1107,6 +1129,7 @@ def parse_upload_form(
         text=text,
         language=language_value,
         remove_punctuation=remove_punctuation_value,
+        client_job_id=client_job_id_raw.strip() if client_job_id_raw else None,
     )
 
 

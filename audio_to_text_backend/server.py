@@ -456,6 +456,7 @@ def build_job_payload(job: audio_to_text.AlignmentJob) -> dict[str, object]:
         "text_filename": job.job_input.text_filename,
         "language": job.job_input.language,
         "remove_punctuation": job.job_input.remove_punctuation,
+        "client_job_id": job.job_input.client_job_id,
         "created_at": job.created_at,
         "started_at": job.result.started_at,
         "completed_at": job.result.completed_at,
@@ -800,6 +801,7 @@ def serve(config: BackendConfig) -> None:
                 audio_path=str(raw_audio_path),
                 text_path=str(text_path),
                 output_path=str(output_path),
+                client_job_id=upload.client_job_id,
             )
             try:
                 job_dir.mkdir(parents=True, exist_ok=True)

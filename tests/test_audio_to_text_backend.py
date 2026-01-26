@@ -99,6 +99,15 @@ def read_sse_data_line(response: http.client.HTTPResponse) -> str:
             return decoded
 
 
+def read_sse_payload(response: http.client.HTTPResponse) -> dict[str, object] | None:
+    """Read the next SSE payload from a response."""
+    line = read_sse_data_line(response)
+    if not line:
+        return None
+    payload_text = line.removeprefix("data:").strip()
+    return json.loads(payload_text)
+
+
 def start_grpc_server(
     repo_root: Path,
     port: int,
@@ -657,6 +666,91 @@ def test_audio_to_text_backend_sse_events(tmp_path: Path) -> None:
         stop_process(grpc_process)
 
 
+def test_audio_to_text_backend_sse_updates_match_client_job_id(
+    tmp_path: Path,
+) -> None:
+    """Stream job updates that preserve client job ids."""
+    repo_root = Path(__file__).resolve().parents[1]
+    grpc_port = free_local_port()
+    backend_port = free_local_port()
+    grpc_process = start_grpc_server(repo_root, grpc_port)
+    backend_process = start_backend_server(
+        repo_root,
+        backend_port,
+        tmp_path / "backend-data",
+        f"127.0.0.1:{grpc_port}",
+        extra_env={"AUDIO_TO_TEXT_BACKEND_KEEPALIVE_SECONDS": "0.1"},
+    )
+    try:
+        wait_for_port("127.0.0.1", grpc_port, timeout_seconds=5)
+        wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
+        base_url = f"http://127.0.0.1:{backend_port}"
+        connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
+        connection.request("GET", "/api/jobs/events")
+        response = connection.getresponse()
+        first_payload = read_sse_payload(response)
+        assert isinstance(first_payload, dict)
+        client_job_id = "client_test_job"
+        wav_bytes = build_wav_bytes(0.1)
+        payload, boundary = build_multipart(
+            {
+                "language": "en",
+                "remove_punctuation": "1",
+                "client_job_id": client_job_id,
+            },
+            [
+                ("audio", "sample.wav", "audio/wav", wav_bytes),
+                ("text", "sample.txt", "text/plain", b"Hi"),
+            ],
+        )
+        request = Request(
+            f"{base_url}/api/jobs",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload)),
+            },
+        )
+        with urlopen(request, timeout=5):
+            pass
+        matched_job = None
+        matched_jobs = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and matched_job is None:
+            payload = read_sse_payload(response)
+            if not payload:
+                continue
+            if payload.get("type") != "snapshot":
+                continue
+            jobs = payload.get("jobs", [])
+            if not isinstance(jobs, list):
+                continue
+            for job in jobs:
+                if (
+                    isinstance(job, dict)
+                    and job.get("client_job_id") == client_job_id
+                ):
+                    matched_job = job
+                    matched_jobs = jobs
+                    break
+        assert matched_job is not None
+        assert matched_jobs is not None
+        matching = [
+            job
+            for job in matched_jobs
+            if isinstance(job, dict)
+            and job.get("client_job_id") == client_job_id
+        ]
+        assert len(matching) == 1
+        assert matched_job.get("job_id") != client_job_id
+        assert matched_job.get("client_job_id") == client_job_id
+        connection.close()
+    finally:
+        stop_process(backend_process)
+        stop_process(grpc_process)
+
+
 def test_audio_to_text_backend_options_and_cors(tmp_path: Path) -> None:
     """Serve CORS preflight responses when requested."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -883,6 +977,19 @@ def test_audio_to_text_backend_rejects_invalid_upload_payloads(
                     ],
                 ),
                 "missing form field: remove_punctuation",
+            ),
+            (
+                build_raw_multipart(
+                    boundary,
+                    [
+                        multipart_field("client_job_id", " "),
+                        multipart_field("language", "en"),
+                        multipart_field("remove_punctuation", "1"),
+                        audio_part,
+                        text_part,
+                    ],
+                ),
+                "client_job_id must be non-empty",
             ),
             (
                 build_raw_multipart(
@@ -1913,6 +2020,10 @@ def test_audio_to_text_backend_rejects_invalid_job_store_payloads(
     payload = build_job_store_payload(job_id)
     payload["jobs"][job_id]["input"]["output_path"] = " "
     cases.append(("output path is required", payload))
+
+    payload = build_job_store_payload(job_id)
+    payload["jobs"][job_id]["input"]["client_job_id"] = " "
+    cases.append(("client job id must be non-empty", payload))
 
     payload = build_job_store_payload(job_id)
     payload["jobs"][job_id]["input"]["remove_punctuation"] = "yes"
