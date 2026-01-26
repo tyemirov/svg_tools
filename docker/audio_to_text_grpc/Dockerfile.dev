@@ -9,6 +9,7 @@ FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    patchelf \
     make \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
@@ -18,5 +19,4 @@ WORKDIR /app
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=builder /root/.cache/uv /root/.cache/uv
 
-ENTRYPOINT ["/app/audio_to_text_grpc.py"]
-
+ENTRYPOINT ["/app/docker/audio_to_text_grpc/entrypoint.sh"]
