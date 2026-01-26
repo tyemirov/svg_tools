@@ -277,3 +277,5 @@ proceed
 - [x] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation. Resolved with a runtime entrypoint patch that clears execstack and Dockerfile updates to install patchelf and use the entrypoint.
 - [ ] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates.
 - [x] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates. Resolved with stable UI job ids and payload validation in the UI list renderer.
+- [ ] [B345] Fix audio_to_text SSE stream stability so UI job status updates keep flowing.
+- [x] [B345] Fix audio_to_text SSE stream stability so UI job status updates keep flowing. Resolved with HTTP/1.1 SSE responses, keepalive data events, reconnect logic, and updated integration coverage.

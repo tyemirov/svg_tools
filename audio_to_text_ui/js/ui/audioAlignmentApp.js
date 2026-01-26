@@ -5,6 +5,7 @@ import {
   DEFAULT_LANGUAGE,
   DEFAULT_REMOVE_PUNCTUATION,
   LANGUAGE_OPTIONS,
+  SSE_RECONNECT_DELAY_MS,
   STATUS_LABELS,
   TEXT_INPUT_ACCEPT,
   UI_STRINGS,
@@ -387,6 +388,9 @@ export function AudioAlignmentApp() {
       try {
         const stream = this.backend.jobStream();
         this.jobStream = stream;
+        stream.addEventListener("open", () => {
+          this.clearError();
+        });
         stream.addEventListener("message", (event) => {
           this.clearError();
           let payload = null;
@@ -395,6 +399,9 @@ export function AudioAlignmentApp() {
           } catch (error) {
             logError("ui.stream.parse_failed", error);
             this.setError(UI_STRINGS.errorStreamParse);
+            return;
+          }
+          if (payload && payload.type === "keepalive") {
             return;
           }
           if (payload && Array.isArray(payload.jobs)) {
@@ -407,6 +414,17 @@ export function AudioAlignmentApp() {
         });
         stream.addEventListener("error", () => {
           this.setError(UI_STRINGS.errorStreamLost);
+          if (stream.readyState !== EventSource.CLOSED) {
+            return;
+          }
+          if (this.jobStream !== stream) {
+            return;
+          }
+          this.jobStream = null;
+          stream.close();
+          if (typeof window !== "undefined") {
+            window.setTimeout(() => this.startJobStream(), SSE_RECONNECT_DELAY_MS);
+          }
         });
       } catch (error) {
         logError("ui.stream.init_failed", error);

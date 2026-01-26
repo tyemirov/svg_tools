@@ -86,6 +86,19 @@ def reset_http_connection(connection: http.client.HTTPConnection) -> None:
     connection.close()
 
 
+def read_sse_data_line(response: http.client.HTTPResponse) -> str:
+    """Read the next SSE data line from a response."""
+    while True:
+        line = response.readline()
+        if not line:
+            return ""
+        decoded = line.decode("utf-8").strip()
+        if not decoded:
+            continue
+        if decoded.startswith("data:"):
+            return decoded
+
+
 def start_grpc_server(
     repo_root: Path,
     port: int,
@@ -636,8 +649,8 @@ def test_audio_to_text_backend_sse_events(tmp_path: Path) -> None:
         sse_request = Request(f"{base_url}/api/jobs/events", headers={"Origin": "https://ui.test"})
         with urlopen(sse_request, timeout=5) as response:
             assert response.headers.get("Access-Control-Allow-Origin") == "*"
-            assert response.headers.get("Content-Type") == "text/event-stream"
-            line = response.readline().decode("utf-8").strip()
+            assert response.headers.get("Content-Type") == "text/event-stream; charset=utf-8"
+            line = read_sse_data_line(response)
         assert line.startswith("data:")
     finally:
         stop_process(backend_process)
@@ -1163,11 +1176,14 @@ def test_audio_to_text_backend_keepalive_sse(tmp_path: Path) -> None:
         wait_for_port("127.0.0.1", grpc_port, timeout_seconds=5)
         wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
         with urlopen(f"http://127.0.0.1:{backend_port}/api/jobs/events", timeout=5) as response:
-            first_line = response.readline().decode("utf-8").strip()
+            first_line = read_sse_data_line(response)
             assert first_line.startswith("data:")
-            response.readline()
-            keepalive = response.readline().decode("utf-8").strip()
-            assert keepalive.startswith(":")
+            payload = json.loads(first_line.removeprefix("data:").strip())
+            assert payload.get("type") == "snapshot"
+            keepalive = read_sse_data_line(response)
+            assert keepalive.startswith("data:")
+            keepalive_payload = json.loads(keepalive.removeprefix("data:").strip())
+            assert keepalive_payload.get("type") == "keepalive"
     finally:
         stop_process(backend_process)
         stop_process(grpc_process)
@@ -1219,11 +1235,10 @@ def test_audio_to_text_backend_sse_keepalive_failure(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", backend_port, timeout_seconds=5)
         with urlopen(f"http://127.0.0.1:{backend_port}/api/jobs/events", timeout=4) as response:
-            first_line = response.readline().decode("utf-8").strip()
+            first_line = read_sse_data_line(response)
             assert first_line.startswith("data:")
-            response.readline()
-            tail = response.readline()
-            assert tail == b""
+            tail = read_sse_data_line(response)
+            assert tail == ""
     finally:
         stop_process(backend_process)
 
@@ -1265,7 +1280,7 @@ def test_audio_to_text_backend_sse_disconnect_on_update(tmp_path: Path) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=4)
         connection.request("GET", "/api/jobs/events")
         response = connection.getresponse()
-        first_line = response.readline().decode("utf-8").strip()
+        first_line = read_sse_data_line(response)
         assert first_line.startswith("data:")
         connection.close()
         base_url = f"http://127.0.0.1:{backend_port}"
@@ -1310,9 +1325,8 @@ def test_audio_to_text_backend_sse_disconnect_on_keepalive(tmp_path: Path) -> No
         connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
         connection.request("GET", "/api/jobs/events")
         response = connection.getresponse()
-        first_line = response.readline().decode("utf-8").strip()
+        first_line = read_sse_data_line(response)
         assert first_line.startswith("data:")
-        response.readline()
         reset_http_connection(connection)
         time.sleep(0.4)
     finally:

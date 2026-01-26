@@ -45,6 +45,7 @@ export const STATUS_LABELS = Object.freeze({
 export const DEFAULT_LANGUAGE = "en";
 export const DEFAULT_REMOVE_PUNCTUATION = true;
 export const DEFAULT_BACKEND_URL = "http://localhost:8080";
+export const SSE_RECONNECT_DELAY_MS = 2000;
 
 export const AUDIO_INPUT_ACCEPT =
   "audio/*,video/*,.wav,.wave,.mp3,.m4a,.aac,.flac,.ogg,.mp4,.mov,.m4v";
