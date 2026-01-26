@@ -273,3 +273,5 @@ proceed
 - [x] [B340] Serve the UI via the gHTTP GHCR image in Docker Compose and update the docs to drop local UI builds.
 - [x] [B341] Ignore `data/` in git to avoid untracked artifact noise.
 - [x] [B342] Fix ctranslate2 exec-stack import failures in the gRPC Docker images by clearing the executable stack requirement during build.
+- [ ] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation.
+- [x] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation. Resolved with a runtime entrypoint patch that clears execstack and Dockerfile updates to install patchelf and use the entrypoint.
