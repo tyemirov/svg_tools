@@ -213,7 +213,6 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
     [--fonts-dir <PATH>] \
     [--audio-track <PATH>] \
     [--direction-seed <INT>] \
-    [--remove-punctuation] \
     [--keep-punctuation] \
     [--subtitle-renderer <motion|criss_cross|rsvp_orp>] \
     [--font-min <INT>] \
@@ -230,7 +229,6 @@ Requires `ffmpeg` with `prores_ks` (alpha_bits), `yuva444p10le`, and `libx264` s
 * `--fonts-dir` should contain .ttf/.otf fonts (bold variants recommended).
 * `--direction-seed` makes direction selection deterministic for a given seed.
 * Punctuation is stripped by default; use `--keep-punctuation` to preserve punctuation.
-* `--remove-punctuation` is accepted for compatibility but matches the default behavior.
 * RSVP punctuation pauses only apply when punctuation is preserved.
 * `--subtitle-renderer criss_cross` explicitly selects the randomized motion renderer (default behavior).
 * `--subtitle-renderer rsvp_orp` enables RSVP/ORP subtitles from SRT/SBV input (single word at a time with ORP anchoring).
@@ -264,40 +262,50 @@ Force-align audio or video to a provided transcript and emit an SRT with word-le
     [--language <CODE>]
 ```
 
-**UI usage:**
-
-```shell
-./audio_to_text.py --ui [--ui-host <HOST>] [--ui-port <PORT>]
-```
-
-The UI provides separate dropzones for audio/video and transcript text, runs alignment in a background job, and offers a download link for the generated SRT.
 audio_to_text is supported on Linux only; on macOS or Windows, run it via Docker.
-Uploads are stored under `data/audio_to_text_uploads` and persisted via the `data/` bind mount in the Docker compose files.
-Model downloads are cached under `data/hf-cache` on the host.
-Torch/torchaudio checkpoints (e.g. wav2vec2 ASR weights) are cached under `data/torch-cache` on the host.
 
 **Supported languages (alignment):** en, fr, de, es, it, ja, zh, nl, uk, pt, ar, cs, ru, pl, hu, fi, fa, el, tr, da, he, vi, ko, ur, te, hi, ca, ml, no, nn, sk, sl, hr, ro, eu, gl, ka.
 **Runtime requirements:** torch >= 2.6 and torchaudio >= 2.6 (pinned for Linux) for AudioMetaData support and Hugging Face `.bin` models.
 
-**Docker (Linux)**
+---
 
-Create the shared env file:
+### `audio_to_text_backend.py`
 
-```shell
-cp .env.audio_to_text.example .env.audio_to_text
-```
+HTTP backend orchestrator for forced-alignment jobs. Accepts audio/video + transcript uploads, extracts WAV via ffmpeg, calls the gRPC aligner, and streams job state via REST + SSE.
 
-Development (bind-mounts the repo for local changes):
+**CLI usage:**
 
 ```shell
-docker compose -f docker/audio_to_text/docker-compose.yml up --build
+./audio_to_text_backend.py [--host <HOST>] [--port <PORT>] [--data-dir <PATH>] [--grpc-target <HOST:PORT>]
 ```
 
-Tests (Linux container):
+Jobs are stored under `data/audio_to_text_backend` (persisted via the `data/` bind mount in Docker).
+
+---
+
+### `audio_to_text_ui`
+
+Standalone browser UI assets live in `audio_to_text_ui/`. Update `audio_to_text_ui/config.js` to override the backend URL; otherwise the UI defaults to the current host.
+
+**Docker (Linux, full stack)**
+
+Create the shared env files:
 
 ```shell
-docker compose -f docker/audio_to_text/docker-compose.yml run --rm --entrypoint make audio_to_text test
+cp .env.audio_to_text_backend.example .env.audio_to_text_backend
+cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 ```
+
+Development (bind-mounts the repo for local changes). The UI is served by the gHTTP image pulled from GHCR (no local build for the UI container):
+
+Profiles: `stack` (UI + backend + gRPC), `grpc` (gRPC only).
+
+```shell
+COMPOSE_PROFILES=stack docker compose -f docker/docker-compose.yml up --build
+```
+
+The gRPC aligner caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` on the host.
+If you open the UI from another device and need to point to a different backend, edit `audio_to_text_ui/config.js` to set `window.__AUDIO_TO_TEXT_CONFIG__.backendUrl`.
 
 ---
 
@@ -319,7 +327,7 @@ cp .env.audio_to_text_grpc.example .env.audio_to_text_grpc
 Development (bind-mounts the repo for local changes):
 
 ```shell
-docker compose -f docker/audio_to_text_grpc/docker-compose.yml up --build
+COMPOSE_PROFILES=grpc docker compose -f docker/docker-compose.yml up --build
 ```
 
 The service caches Hugging Face models under `data/hf-cache` and Torch/torchaudio checkpoints under `data/torch-cache` via bind mounts.
