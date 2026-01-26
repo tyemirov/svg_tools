@@ -26,6 +26,7 @@ export const UI_STRINGS = Object.freeze({
   errorDeleteFailed: "Failed to delete the job.",
   errorLoadJobs: "Failed to load job history.",
   errorUploadFailed: "Failed to start alignment.",
+  errorInvalidJob: "Received invalid job data.",
   errorStreamParse: "Failed to parse job updates.",
   errorStreamLost: "Connection lost while streaming job updates.",
   errorStreamInit: "Failed to connect to job updates.",
@@ -44,6 +45,7 @@ export const STATUS_LABELS = Object.freeze({
 export const DEFAULT_LANGUAGE = "en";
 export const DEFAULT_REMOVE_PUNCTUATION = true;
 export const DEFAULT_BACKEND_URL = "http://localhost:8080";
+export const SSE_RECONNECT_DELAY_MS = 2000;
 
 export const AUDIO_INPUT_ACCEPT =
   "audio/*,video/*,.wav,.wave,.mp3,.m4a,.aac,.flac,.ogg,.mp4,.mov,.m4v";
