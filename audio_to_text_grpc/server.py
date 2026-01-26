@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import math
 import dataclasses
+import functools
 import logging
 import os
 import tempfile
@@ -38,6 +40,7 @@ DEFAULT_ALIGNMENT_TIMEOUT_SECONDS = 300.0
 
 TEST_MODE_ENV = "AUDIO_TO_TEXT_GRPC_TEST_MODE"
 TEST_DELAY_ENV = "AUDIO_TO_TEXT_GRPC_TEST_DELAY_MS"
+TEST_CRASH_ENV = "AUDIO_TO_TEXT_GRPC_TEST_CRASH"
 AUTH_TOKEN_ENV = "AUDIO_TO_TEXT_GRPC_AUTH_TOKEN"
 MAX_AUDIO_BYTES_ENV = "AUDIO_TO_TEXT_GRPC_MAX_AUDIO_BYTES"
 MAX_TRANSCRIPT_CHARS_ENV = "AUDIO_TO_TEXT_GRPC_MAX_TRANSCRIPT_CHARS"
@@ -72,6 +75,9 @@ class AlignRequest:
     remove_punctuation: bool
     audio_filename: str
     audio_bytes: int
+
+
+AlignmentRunner = Callable[[AlignRequest], list[audio_to_text.AlignedWord]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,6 +168,7 @@ class ServerConfig:
     auth_token: str | None
     test_mode: bool
     test_delay_seconds: float
+    test_crash: bool
     tls_cert_path: Path | None
     tls_key_path: Path | None
 
@@ -229,6 +236,11 @@ def parse_non_negative_float(raw_value: str, field_name: str) -> float:
     if parsed < 0:
         raise ValueError(f"{field_name} must be non-negative")
     return parsed
+
+
+def parse_bool(raw_value: str) -> bool:
+    """Parse a boolean from a string."""
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def read_env_int(
@@ -358,8 +370,12 @@ def load_config(args: argparse.Namespace, env: dict[str, str]) -> ServerConfig:
     if auth_token is None:
         auth_token = env.get(AUTH_TOKEN_ENV, "").strip() or None
 
+    test_mode = is_test_mode(env)
     test_delay_ms = read_env_float(env, TEST_DELAY_ENV, "test-delay-ms", 0.0) or 0.0
     test_delay_seconds = test_delay_ms / 1000.0
+    test_crash = parse_bool(env.get(TEST_CRASH_ENV, ""))
+    if test_crash and not test_mode:
+        raise ValueError("test-crash requires test mode")
 
     tls_cert_path = resolve_optional_path(
         args.tls_cert or env.get(TLS_CERT_ENV), "tls-cert"
@@ -381,8 +397,9 @@ def load_config(args: argparse.Namespace, env: dict[str, str]) -> ServerConfig:
         max_inflight=int(max_inflight),
         alignment_timeout_seconds=float(alignment_timeout),
         auth_token=auth_token,
-        test_mode=is_test_mode(env),
+        test_mode=test_mode,
         test_delay_seconds=float(test_delay_seconds),
+        test_crash=test_crash,
         tls_cert_path=tls_cert_path,
         tls_key_path=tls_key_path,
     )
@@ -397,7 +414,31 @@ def build_server_credentials(config: ServerConfig) -> grpc.ServerCredentials | N
     return grpc.ssl_server_credentials(((key_bytes, certificate_bytes),))
 
 
-def ensure_deadline(context: grpc.ServicerContext) -> None:
+def resolve_time_remaining(
+    context: grpc.ServicerContext, test_mode: bool
+) -> float | None:
+    """Resolve request time remaining with optional test overrides."""
+    remaining = context.time_remaining()
+    if not test_mode:
+        return remaining
+    metadata: dict[str, str] = {}
+    for key, value in context.invocation_metadata():
+        metadata[str(key).lower()] = str(value)
+    override = metadata.get("x-test-remaining")
+    if override is None:
+        return remaining
+    token = override.strip().lower()
+    if token == "inf":
+        return math.inf
+    if token == "none":
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return remaining
+
+
+def ensure_deadline(context: grpc.ServicerContext, test_mode: bool = False) -> None:
     """Ensure the request deadline has not expired."""
     if not context.is_active():
         raise GrpcRequestError(
@@ -405,7 +446,7 @@ def ensure_deadline(context: grpc.ServicerContext) -> None:
             REQUEST_CANCELLED_CODE,
             "request cancelled",
         )
-    remaining = context.time_remaining()
+    remaining = resolve_time_remaining(context, test_mode)
     if remaining is not None and remaining <= 0:
         raise GrpcRequestError(
             grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -421,7 +462,7 @@ def collect_request(
     temp_root: Path,
 ) -> AlignRequest:
     """Collect a streaming request into a temporary WAV file."""
-    ensure_deadline(context)
+    ensure_deadline(context, config.test_mode)
     first = next(request_iterator, None)
     if first is None or first.WhichOneof("payload") != "init":
         raise GrpcRequestError(
@@ -507,15 +548,20 @@ def collect_request(
 
 
 def align_in_test_mode(
-    transcript: str, delay_seconds: float, sleep: Callable[[float], None]
+    request: AlignRequest,
+    delay_seconds: float,
+    sleep: Callable[[float], None],
+    crash: bool,
 ) -> list[audio_to_text.AlignedWord]:
     """Return deterministic fake alignment for integration tests."""
+    if crash:
+        raise RuntimeError("test alignment crash")
     if delay_seconds > 0:
         sleep(delay_seconds)
     aligned: list[audio_to_text.AlignedWord] = []
     cursor = 0.0
     step = 0.25
-    for token in transcript.split():
+    for token in request.transcript.split():
         aligned.append(
             audio_to_text.AlignedWord(
                 text=token,
@@ -529,7 +575,7 @@ def align_in_test_mode(
 
 def align_in_process(request: AlignRequest) -> list[audio_to_text.AlignedWord]:
     """Run whisperx alignment in-process."""
-    device = audio_to_text.resolve_device(audio_to_text.DEVICE_AUTO)
+    device = audio_to_text.resolve_device()
     return audio_to_text.align_words(
         str(request.wav_path),
         request.transcript,
@@ -537,6 +583,21 @@ def align_in_process(request: AlignRequest) -> list[audio_to_text.AlignedWord]:
         device,
         remove_punctuation=request.remove_punctuation,
     )
+
+
+def build_alignment_runner(
+    config: ServerConfig,
+    sleep: Callable[[float], None],
+) -> AlignmentRunner:
+    """Build an alignment runner for the server."""
+    if config.test_mode:
+        return functools.partial(
+            align_in_test_mode,
+            delay_seconds=config.test_delay_seconds,
+            sleep=sleep,
+            crash=config.test_crash,
+        )
+    return align_in_process
 
 
 class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
@@ -547,13 +608,13 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         config: ServerConfig,
         metrics: MetricsRegistry,
         clock: Callable[[], float],
-        sleep: Callable[[float], None],
+        alignment_runner: AlignmentRunner,
         alignment_executor: futures.Executor,
     ) -> None:
         self._config = config
         self._metrics = metrics
         self._clock = clock
-        self._sleep = sleep
+        self._alignment_runner = alignment_runner
         self._alignment_executor = alignment_executor
         self._inflight_semaphore = threading.BoundedSemaphore(config.max_inflight)
 
@@ -572,16 +633,20 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         request_id = uuid.uuid4().hex
         start_time = self._clock()
         success = False
-        metrics_started = False
+        request_language = "unknown"
+        request_audio_filename = "unknown"
+        request_remove_punctuation = False
         try:
             self._metrics.record_start()
-            metrics_started = True
             self._authorize(context)
             with tempfile.TemporaryDirectory(prefix="audio_to_text_grpc_") as temp_dir:
                 temp_root = Path(temp_dir)
                 request = collect_request(
                     request_iterator, self._config, context, temp_root
                 )
+                request_language = request.language
+                request_audio_filename = request.audio_filename
+                request_remove_punctuation = request.remove_punctuation
                 self._metrics.record_bytes(request.audio_bytes)
                 LOGGER.info(
                     "audio_to_text_grpc.request.started id=%s bytes=%s language=%s",
@@ -589,9 +654,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                     request.audio_bytes,
                     request.language,
                 )
-                ensure_deadline(context)
+                ensure_deadline(context, self._config.test_mode)
                 aligned_words = self._run_alignment(request, context)
-                ensure_deadline(context)
+                ensure_deadline(context, self._config.test_mode)
                 srt_text = audio_to_text.build_srt(aligned_words)
             response_words = [
                 audio_to_text_grpc_pb2.AlignedWord(
@@ -609,24 +674,22 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
             )
         except GrpcRequestError as exc:
             LOGGER.warning(
-                "audio_to_text_grpc.request.failed id=%s code=%s status=%s",
+                "audio_to_text_grpc.request.failed id=%s code=%s status=%s error=%s",
                 request_id,
                 exc.code,
                 exc.status.name,
+                str(exc),
             )
             context.abort(exc.status, f"{exc.code}: {exc}")
-        except audio_to_text.AlignmentValidationError as exc:
-            LOGGER.warning(
-                "audio_to_text_grpc.request.invalid id=%s code=%s",
-                request_id,
-                exc.code,
-            )
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"{exc.code}: {exc}")
         except audio_to_text.AlignmentPipelineError as exc:
             LOGGER.error(
-                "audio_to_text_grpc.request.error id=%s code=%s",
+                "audio_to_text_grpc.request.error id=%s code=%s error=%s language=%s audio=%s remove_punctuation=%s",
                 request_id,
                 exc.code,
+                str(exc),
+                request_language,
+                request_audio_filename,
+                request_remove_punctuation,
             )
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"{exc.code}: {exc}")
         except Exception as exc:
@@ -634,8 +697,7 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
             context.abort(grpc.StatusCode.INTERNAL, f"{ALIGNMENT_FAILED_CODE}: {exc}")
         finally:
             latency = max(0.0, self._clock() - start_time)
-            if metrics_started:
-                self._metrics.record_finish(success, latency)
+            self._metrics.record_finish(success, latency)
             self._inflight_semaphore.release()
 
     def GetStats(
@@ -681,16 +743,10 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         self, request: AlignRequest, context: grpc.ServicerContext
     ) -> list[audio_to_text.AlignedWord]:
         """Run alignment with timeout handling."""
-        if self._config.test_mode:
-            return self._run_with_timeout(
-                lambda: align_in_test_mode(
-                    request.transcript,
-                    self._config.test_delay_seconds,
-                    self._sleep,
-                ),
-                context,
-            )
-        return self._run_with_timeout(lambda: align_in_process(request), context)
+        return self._run_with_timeout(
+            lambda: self._alignment_runner(request),
+            context,
+        )
 
     def _run_with_timeout(
         self,
@@ -716,7 +772,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         self, context: grpc.ServicerContext
     ) -> float | None:
         """Compute the effective alignment timeout."""
-        remaining = context.time_remaining()
+        remaining = resolve_time_remaining(context, self._config.test_mode)
+        if remaining is not None and math.isinf(remaining):
+            remaining = None
         if self._config.alignment_timeout_seconds <= 0:
             return remaining
         if remaining is None:
@@ -728,7 +786,7 @@ def serve(
     config: ServerConfig,
     metrics: MetricsRegistry,
     clock: Callable[[], float],
-    sleep: Callable[[float], None],
+    alignment_runner: AlignmentRunner,
 ) -> None:
     """Run the gRPC server."""
     alignment_executor = futures.ThreadPoolExecutor(max_workers=config.max_inflight)
@@ -743,7 +801,7 @@ def serve(
         config=config,
         metrics=metrics,
         clock=clock,
-        sleep=sleep,
+        alignment_runner=alignment_runner,
         alignment_executor=alignment_executor,
     )
     audio_to_text_grpc_pb2_grpc.add_AudioToTextServicer_to_server(service, server)
@@ -764,7 +822,12 @@ def serve(
 
     server.start()
     LOGGER.info("audio_to_text_grpc.server.started address=%s", address)
-    server.wait_for_termination()
+    try:
+        server.wait_for_termination()
+    except KeyboardInterrupt:
+        LOGGER.info("audio_to_text_grpc.server.shutdown: received interrupt")
+    finally:
+        server.stop(grace=None)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -779,7 +842,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     metrics = MetricsRegistry(started_at=time.monotonic())
-    serve(config=config, metrics=metrics, clock=time.monotonic, sleep=time.sleep)
+    alignment_runner = build_alignment_runner(config=config, sleep=time.sleep)
+    serve(
+        config=config,
+        metrics=metrics,
+        clock=time.monotonic,
+        alignment_runner=alignment_runner,
+    )
     return 0
 
 
