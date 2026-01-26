@@ -2,7 +2,7 @@
 
 UV_CACHE_DIR ?= $(CURDIR)/.cache/uv
 COVERAGE_CONFIG ?= $(CURDIR)/.coveragerc
-COVERAGE_FAIL_UNDER ?= 67
+COVERAGE_FAIL_UNDER ?= 100
 
 test:
 	mkdir -p "$(UV_CACHE_DIR)"

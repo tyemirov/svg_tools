@@ -7,8 +7,6 @@ import math
 from typing import Sequence, Tuple
 
 from domain.text_video import (
-    EMPTY_TEXT_CODE,
-    INVALID_CONFIG_CODE,
     INVALID_WINDOW_CODE,
     RenderValidationError,
     SubtitleWindow,
@@ -28,20 +26,6 @@ class ScheduledWord:
     start_frame: int
     frame_count: int
 
-    def __post_init__(self) -> None:
-        if self.token_index < 0:
-            raise RenderValidationError(
-                INVALID_CONFIG_CODE, "token_index must be non-negative"
-            )
-        if self.start_frame < 0:
-            raise RenderValidationError(
-                INVALID_CONFIG_CODE, "start_frame must be non-negative"
-            )
-        if self.frame_count <= 0:
-            raise RenderValidationError(
-                INVALID_CONFIG_CODE, "frame_count must be positive"
-            )
-
 
 @dataclass(frozen=True)
 class RenderPlan:
@@ -51,44 +35,12 @@ class RenderPlan:
     words: Tuple[str, ...]
     scheduled_words: Tuple[ScheduledWord, ...]
 
-    def __post_init__(self) -> None:
-        if self.total_frames <= 0:
-            raise RenderValidationError(
-                INVALID_CONFIG_CODE, "total_frames must be positive"
-            )
-        if not self.words:
-            raise RenderValidationError(EMPTY_TEXT_CODE, "no words to render")
-
-        last_end_frame = 0
-        for scheduled_word in self.scheduled_words:
-            if scheduled_word.token_index >= len(self.words):
-                raise RenderValidationError(
-                    INVALID_CONFIG_CODE, "token_index out of bounds"
-                )
-            end_frame = scheduled_word.start_frame + scheduled_word.frame_count
-            if end_frame > self.total_frames:
-                raise RenderValidationError(
-                    INVALID_CONFIG_CODE, "scheduled word exceeds total frames"
-                )
-            if scheduled_word.start_frame < last_end_frame:
-                raise RenderValidationError(
-                    INVALID_CONFIG_CODE, "scheduled words overlap"
-                )
-            last_end_frame = end_frame
-
 
 def build_render_plan(
     windows: Sequence[SubtitleWindow], fps: int, duration_seconds: float
 ) -> RenderPlan:
     """Build a render plan from subtitle windows and timing."""
-    if not windows:
-        raise RenderValidationError(EMPTY_TEXT_CODE, "no subtitle windows")
-
     total_frames = int(round(duration_seconds * fps))
-    if total_frames <= 0:
-        raise RenderValidationError(
-            INVALID_CONFIG_CODE, "duration and fps produce zero frames"
-        )
 
     scheduled_words: list[ScheduledWord] = []
     words: list[str] = []
@@ -103,11 +55,6 @@ def build_render_plan(
             raise RenderValidationError(
                 INVALID_WINDOW_CODE, "subtitle windows overlap"
             )
-        if window_end_frame > total_frames:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window exceeds duration"
-            )
-
         window_frames = window_end_frame - window_start_frame
         word_count = len(window.words)
         if window_frames < word_count:
@@ -169,20 +116,9 @@ def allocate_weighted_frames(
     max_frames: int,
 ) -> Tuple[int, ...]:
     """Allocate frames to weights while respecting min/max bounds."""
-    if not weights:
-        raise RenderValidationError(INVALID_WINDOW_CODE, "subtitle window has no words")
-
     word_count = len(weights)
     min_total = min_frames * word_count
     max_total = max_frames * word_count
-    if total_frames < min_total:
-        raise RenderValidationError(
-            INVALID_WINDOW_CODE, "subtitle window too short for RSVP timing"
-        )
-    if total_frames > max_total:
-        raise RenderValidationError(
-            INVALID_WINDOW_CODE, "subtitle window too long for RSVP timing"
-        )
 
     allocations = [min_frames for _ in range(word_count)]
     remaining = total_frames - min_total
@@ -192,8 +128,6 @@ def allocate_weighted_frames(
     active = {index for index in range(word_count) if allocations[index] < max_frames}
     while remaining > 0 and active:
         total_weight = sum(weights[index] for index in active)
-        if total_weight <= 0:
-            break
 
         remainders: list[tuple[float, int]] = []
         used = 0
@@ -220,10 +154,7 @@ def allocate_weighted_frames(
 
         active = {index for index in active if allocations[index] < max_frames}
 
-    if remaining > 0:
-        raise RenderValidationError(
-            INVALID_WINDOW_CODE, "subtitle window cannot allocate RSVP frames"
-        )
+    assert remaining == 0
 
     return tuple(allocations)
 
@@ -257,14 +188,7 @@ def build_rsvp_render_plan(
     windows: Sequence[SubtitleWindow], fps: int, duration_seconds: float
 ) -> RenderPlan:
     """Build a render plan for RSVP-style word timing."""
-    if not windows:
-        raise RenderValidationError(EMPTY_TEXT_CODE, "no subtitle windows")
-
     total_frames = int(round(duration_seconds * fps))
-    if total_frames <= 0:
-        raise RenderValidationError(
-            INVALID_CONFIG_CODE, "duration and fps produce zero frames"
-        )
 
     min_frames = ms_to_frames_ceil(RSVP_MIN_MS, fps)
     max_frames = ms_to_frames_floor(RSVP_MAX_MS, fps)
@@ -280,18 +204,8 @@ def build_rsvp_render_plan(
         window_start_frame, window_end_frame = window_to_frames(
             window.start_seconds, window.end_seconds, fps
         )
-        if window_end_frame > total_frames:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window exceeds duration"
-            )
-
         window_frames = window_end_frame - window_start_frame
         word_count = len(window.words)
-        if word_count <= 0:
-            raise RenderValidationError(
-                INVALID_WINDOW_CODE, "subtitle window has no words"
-            )
-
         punctuation_flags = []
         weights: list[int] = []
         for word in window.words:
