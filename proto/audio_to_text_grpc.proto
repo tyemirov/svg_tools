@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package svg_tools.audio_to_text.v1;
+
+option java_multiple_files = true;
+option java_package = "com.svgtools.audiototext.v1";
+
+enum PunctuationMode {
+  PUNCTUATION_MODE_UNSPECIFIED = 0;
+  PUNCTUATION_MODE_REMOVE = 1;
+  PUNCTUATION_MODE_KEEP = 2;
+}
+
+message AlignInit {
+  string language = 1;
+  PunctuationMode punctuation = 2;
+  string transcript = 3;
+  string audio_filename = 4;
+}
+
+message AlignChunk {
+  oneof payload {
+    AlignInit init = 1;
+    bytes wav_chunk = 2;
+  }
+}
+
+message AlignedWord {
+  string text = 1;
+  double start_seconds = 2;
+  double end_seconds = 3;
+}
+
+message AlignResponse {
+  repeated AlignedWord words = 1;
+  string srt = 2;
+  string audio_filename = 3;
+}
+
+message StatsRequest {}
+
+message StatsResponse {
+  uint64 requests_total = 1;
+  uint64 requests_succeeded = 2;
+  uint64 requests_failed = 3;
+  uint64 inflight = 4;
+  uint64 bytes_received = 5;
+  double uptime_seconds = 6;
+  double average_latency_seconds = 7;
+  double max_latency_seconds = 8;
+}
+
+service AudioToText {
+  rpc Align(stream AlignChunk) returns (AlignResponse);
+  rpc GetStats(StatsRequest) returns (StatsResponse);
+}
