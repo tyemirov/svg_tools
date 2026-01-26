@@ -624,11 +624,7 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         context: grpc.ServicerContext,
     ) -> audio_to_text_grpc_pb2.AlignResponse:
         """Align a transcript to a streamed WAV."""
-        if not self._inflight_semaphore.acquire(blocking=False):
-            context.abort(
-                grpc.StatusCode.RESOURCE_EXHAUSTED,
-                f"{INFLIGHT_LIMIT_CODE}: too many concurrent requests",
-            )
+        acquired = self._inflight_semaphore.acquire(blocking=False)
 
         request_id = uuid.uuid4().hex
         start_time = self._clock()
@@ -637,6 +633,12 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
         request_audio_filename = "unknown"
         request_remove_punctuation = False
         try:
+            if not acquired:
+                raise GrpcRequestError(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    INFLIGHT_LIMIT_CODE,
+                    "too many concurrent requests",
+                )
             self._metrics.record_start()
             self._authorize(context)
             with tempfile.TemporaryDirectory(prefix="audio_to_text_grpc_") as temp_dir:
@@ -696,9 +698,10 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
             LOGGER.exception("audio_to_text_grpc.request.crash id=%s", request_id)
             context.abort(grpc.StatusCode.INTERNAL, f"{ALIGNMENT_FAILED_CODE}: {exc}")
         finally:
-            latency = max(0.0, self._clock() - start_time)
-            self._metrics.record_finish(success, latency)
-            self._inflight_semaphore.release()
+            if acquired:
+                latency = max(0.0, self._clock() - start_time)
+                self._metrics.record_finish(success, latency)
+                self._inflight_semaphore.release()
 
     def GetStats(
         self,
