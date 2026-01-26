@@ -229,6 +229,36 @@ export function AudioAlignmentApp() {
     jobDeletable(job) {
       return job.status === "completed" || job.status === "failed";
     },
+    reportInvalidJob(message) {
+      logError("ui.jobs.invalid_payload", new Error(message));
+      this.setError(UI_STRINGS.errorInvalidJob);
+    },
+    buildUiIdLookup() {
+      const lookup = new Map();
+      for (const job of this.jobs) {
+        if (!job || typeof job.job_id !== "string" || !job.job_id) {
+          continue;
+        }
+        const uiId = typeof job.ui_id === "string" && job.ui_id ? job.ui_id : job.job_id;
+        lookup.set(job.job_id, uiId);
+      }
+      return lookup;
+    },
+    normalizeIncomingJob(job, uiIdLookup) {
+      if (!job || typeof job !== "object") {
+        this.reportInvalidJob("job payload must be an object");
+        return null;
+      }
+      const jobId = typeof job.job_id === "string" && job.job_id ? job.job_id : null;
+      if (!jobId) {
+        this.reportInvalidJob("job_id missing from payload");
+        return null;
+      }
+      const uiId =
+        uiIdLookup.get(jobId) ||
+        (typeof job.ui_id === "string" && job.ui_id ? job.ui_id : jobId);
+      return { ...job, job_id: jobId, ui_id: uiId, is_optimistic: false };
+    },
     sortedJobs() {
       return [...this.jobs].sort((left, right) => {
         const leftOptimistic = Boolean(left.is_optimistic);
@@ -248,6 +278,7 @@ export function AudioAlignmentApp() {
       const optimisticId = `local_${Date.now().toString(16)}_${Math.random().toString(16).slice(2)}`;
       const createdAt = Date.now() / 1000;
       return {
+        ui_id: optimisticId,
         job_id: optimisticId,
         status: "queued",
         message: UI_STRINGS.statusQueued,
@@ -264,26 +295,40 @@ export function AudioAlignmentApp() {
       };
     },
     applyJobsList(jobs) {
-      const optimisticJobs = this.jobs.filter((job) => job.is_optimistic);
       const merged = Array.isArray(jobs) ? jobs : [];
-      const optimistic = optimisticJobs.filter((job) =>
-        !merged.some((entry) => entry.job_id === job.job_id)
+      const uiIdLookup = this.buildUiIdLookup();
+      const normalized = [];
+      for (const job of merged) {
+        const normalizedJob = this.normalizeIncomingJob(job, uiIdLookup);
+        if (normalizedJob) {
+          normalized.push(normalizedJob);
+        }
+      }
+      const optimisticJobs = this.jobs.filter((job) => job && job.is_optimistic);
+      const optimistic = optimisticJobs.filter(
+        (job) => !normalized.some((entry) => entry.job_id === job.job_id)
       );
-      this.jobs = [...merged, ...optimistic];
+      this.jobs = [...normalized, ...optimistic];
     },
     applyJobUpdate(job) {
-      if (!job || !job.job_id) {
+      const uiIdLookup = this.buildUiIdLookup();
+      const normalized = this.normalizeIncomingJob(job, uiIdLookup);
+      if (!normalized) {
         return;
       }
-      if (this.claimPendingSubmission(job)) {
+      if (this.claimPendingSubmission(normalized)) {
         return;
       }
-      const index = this.jobs.findIndex((entry) => entry.job_id === job.job_id);
+      const index = this.jobs.findIndex((entry) => entry.job_id === normalized.job_id);
       if (index >= 0) {
-        this.jobs.splice(index, 1, { ...this.jobs[index], ...job, is_optimistic: false });
+        const existing = this.jobs[index];
+        const uiId =
+          (existing && typeof existing.ui_id === "string" && existing.ui_id) ||
+          normalized.ui_id;
+        this.jobs.splice(index, 1, { ...existing, ...normalized, ui_id: uiId });
         return;
       }
-      this.jobs.unshift(job);
+      this.jobs.unshift(normalized);
     },
     claimPendingSubmission(job) {
       if (!this.pendingSubmission || !job || !job.job_id) {
@@ -311,7 +356,11 @@ export function AudioAlignmentApp() {
       const optimisticId = this.pendingSubmission.optimistic_job_id;
       const index = this.jobs.findIndex((entry) => entry.job_id === optimisticId);
       if (index >= 0) {
-        this.jobs.splice(index, 1, { ...job, is_optimistic: false });
+        const existing = this.jobs[index];
+        const uiId =
+          (existing && typeof existing.ui_id === "string" && existing.ui_id) ||
+          optimisticId;
+        this.jobs.splice(index, 1, { ...job, ui_id: uiId, is_optimistic: false });
         this.pendingSubmission = null;
         return true;
       }

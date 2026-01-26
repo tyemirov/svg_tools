@@ -275,3 +275,5 @@ proceed
 - [x] [B342] Fix ctranslate2 exec-stack import failures in the gRPC Docker images by clearing the executable stack requirement during build.
 - [ ] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation.
 - [x] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation. Resolved with a runtime entrypoint patch that clears execstack and Dockerfile updates to install patchelf and use the entrypoint.
+- [ ] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates.
+- [x] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates. Resolved with stable UI job ids and payload validation in the UI list renderer.

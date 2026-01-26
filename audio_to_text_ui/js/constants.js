@@ -26,6 +26,7 @@ export const UI_STRINGS = Object.freeze({
   errorDeleteFailed: "Failed to delete the job.",
   errorLoadJobs: "Failed to load job history.",
   errorUploadFailed: "Failed to start alignment.",
+  errorInvalidJob: "Received invalid job data.",
   errorStreamParse: "Failed to parse job updates.",
   errorStreamLost: "Connection lost while streaming job updates.",
   errorStreamInit: "Failed to connect to job updates.",
