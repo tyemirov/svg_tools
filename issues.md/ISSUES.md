@@ -253,3 +253,31 @@ proceed
 - [ ] [I130] Make backend alignment jobs asynchronous/decoupled from gRPC calls to allow queueing and retries.
 - Tooling baseline (I129): `make test` fails because `audio_to_text_backend` server entrypoint is not implemented yet (backend tests time out).
 - [x] [I129] Split audio_to_text into a standalone UI, HTTP backend orchestrator, and gRPC aligner with a 3-service Docker Compose stack. Resolved with the new backend package, standalone UI assets, stack compose/env updates, and integration coverage for backend job flow/SSE.
+- [ ] [I131] Inject a test alignment runner into audio_to_text_grpc so the gRPC service always uses a single alignment pipeline with an injected runner.
+- [x] [I131] Inject a test alignment runner into audio_to_text_grpc so the gRPC service always uses a single alignment pipeline with an injected runner. Resolved with alignment runner injection and startup selection for test mode.
+- [ ] [I132] Wire pytest-cov into make ci with subprocess coverage capture and a coverage gate.
+- [x] [I132] Wire pytest-cov into make ci with subprocess coverage capture and a coverage gate. Resolved with coverage config, subprocess hook, Python-based CLI invocation in tests, and CI coverage reporting/gating.
+- [ ] [I133] Raise CI coverage gate to 100% by expanding integration coverage for audio_to_text, audio_to_text_backend, and render_text_video.
+- [x] [I133] Raise CI coverage gate to 100% by expanding integration coverage for audio_to_text, audio_to_text_backend, and render_text_video. Resolved with expanded integration coverage, refreshed TLS fixtures, and a 100% coverage gate in `make ci`.
+- [ ] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits.
+- [x] [B334] Fix Docker dev stack failing to start when audio_to_text entrypoints lack executable bits. Resolved by marking gRPC/backend scripts executable for volume-mounted dev runs.
+- [ ] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`.
+- [x] [B335] Fix Docker dev stack failing when TLS env vars are set to empty values in `.env.audio_to_text_grpc`. Resolved by removing empty TLS entries from the example env file.
+- [ ] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage.
+- [x] [B336] Consolidate Docker Compose files into a single file with profiles for stack/grpc/legacy usage. Resolved with a unified compose file and updated docs.
+- [ ] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host.
+- [x] [B337] Fix UI SSE failures on non-localhost clients by defaulting backend URL to the current host. Resolved with dynamic backend URL resolution and updated docs/env defaults.
+- [x] [M407] Remove legacy audio_to_text stack artifacts and compatibility flags. Resolved by dropping the legacy docker service/env files, removing compatibility docs, and simplifying the render_text_video punctuation flag to a single keep override.
+- [x] [B338] Surface alignment failure details in gRPC logs and classify missing-timestamp alignment errors from whisperx with `audio_to_text.align.missing_timestamps`.
+- [x] [B339] Allow SSE access from non-localhost UI by default and assert SSE CORS headers in integration tests.
+- [x] [B340] Serve the UI via the gHTTP GHCR image in Docker Compose and update the docs to drop local UI builds.
+- [x] [B341] Ignore `data/` in git to avoid untracked artifact noise.
+- [x] [B342] Fix ctranslate2 exec-stack import failures in the gRPC Docker images by clearing the executable stack requirement during build.
+- [ ] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation.
+- [x] [B343] Fix gRPC runtime ctranslate2 exec-stack import failures by clearing the executable stack requirement after uv env creation. Resolved with a runtime entrypoint patch that clears execstack and Dockerfile updates to install patchelf and use the entrypoint.
+- [ ] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates.
+- [x] [B344] Fix Alpine job list rendering crash when job keys change during optimistic updates. Resolved with stable UI job ids and payload validation in the UI list renderer.
+- [ ] [B345] Fix audio_to_text SSE stream stability so UI job status updates keep flowing.
+- [x] [B345] Fix audio_to_text SSE stream stability so UI job status updates keep flowing. Resolved with HTTP/1.1 SSE responses, keepalive data events, reconnect logic, and updated integration coverage.
+- [ ] [B346] Fix duplicate UI job cards by correlating optimistic jobs with backend updates.
+- [x] [B346] Fix duplicate UI job cards by correlating optimistic jobs with backend updates. Resolved with client job ids, UI reconciliation updates, and SSE integration coverage.

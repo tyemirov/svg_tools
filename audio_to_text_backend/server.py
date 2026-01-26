@@ -54,6 +54,7 @@ FFMPEG_PATH_ENV = "AUDIO_TO_TEXT_BACKEND_FFMPEG_PATH"
 MAX_WORKERS_ENV = "AUDIO_TO_TEXT_BACKEND_MAX_WORKERS"
 LOG_LEVEL_ENV = "AUDIO_TO_TEXT_BACKEND_LOG_LEVEL"
 KEEPALIVE_SECONDS_ENV = "AUDIO_TO_TEXT_BACKEND_KEEPALIVE_SECONDS"
+SSE_FAILURE_MODE_ENV = "AUDIO_TO_TEXT_BACKEND_SSE_FAILURE_MODE"
 
 BACKEND_CONFIG_CODE = "audio_to_text_backend.config.invalid"
 BACKEND_UPLOAD_CODE = "audio_to_text_backend.upload.invalid"
@@ -66,6 +67,14 @@ BACKEND_UPLOAD_WRITE_CODE = "audio_to_text_backend.upload.write_failed"
 BACKEND_OUTPUT_NOT_FOUND_CODE = "audio_to_text_backend.output.not_found"
 BACKEND_OUTPUT_READ_CODE = "audio_to_text_backend.output.read_failed"
 BACKEND_NOT_FOUND_CODE = "audio_to_text_backend.path.not_found"
+SSE_FAILURE_SNAPSHOT = "snapshot"
+SSE_FAILURE_KEEPALIVE = "keepalive"
+SSE_FAILURE_UPDATE = "update"
+SSE_FAILURE_MODES = {
+    SSE_FAILURE_SNAPSHOT,
+    SSE_FAILURE_KEEPALIVE,
+    SSE_FAILURE_UPDATE,
+}
 
 
 class BackendError(RuntimeError):
@@ -94,6 +103,7 @@ class BackendConfig:
     ffmpeg_path: str
     max_workers: int
     keepalive_seconds: float
+    sse_failure_mode: str | None
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -114,6 +124,9 @@ class BackendConfig:
             raise ValueError("max-workers must be positive")
         if self.keepalive_seconds <= 0:
             raise ValueError("keepalive-seconds must be positive")
+        if self.sse_failure_mode is not None:
+            if self.sse_failure_mode not in SSE_FAILURE_MODES:
+                raise ValueError("sse-failure-mode is invalid")
 
 
 def parse_positive_int(raw_value: str, label: str) -> int:
@@ -136,6 +149,14 @@ def parse_non_negative_float(raw_value: str, label: str) -> float:
     if value < 0:
         raise ValueError(f"{label} must be non-negative")
     return value
+
+
+def parse_sse_failure_mode(env: dict[str, str]) -> str | None:
+    """Parse the optional SSE failure mode."""
+    raw_value = env.get(SSE_FAILURE_MODE_ENV, "").strip()
+    if not raw_value:
+        return None
+    return raw_value
 
 
 def parse_bool(raw_value: str) -> bool:
@@ -177,9 +198,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="audio_to_text_backend.py", add_help=True
     )
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--data-dir", default=None)
     parser.add_argument("--grpc-target", default=None)
     parser.add_argument("--grpc-timeout-seconds", type=float, default=None)
     parser.add_argument("--grpc-max-message-bytes", type=int, default=None)
@@ -268,6 +289,7 @@ def load_config(args: argparse.Namespace, env: dict[str, str]) -> BackendConfig:
     )
     if args.keepalive_seconds is not None:
         keepalive = args.keepalive_seconds
+    sse_failure_mode = parse_sse_failure_mode(env)
     return BackendConfig(
         host=str(host),
         port=int(port),
@@ -283,6 +305,7 @@ def load_config(args: argparse.Namespace, env: dict[str, str]) -> BackendConfig:
         ffmpeg_path=str(ffmpeg_path),
         max_workers=int(max_workers),
         keepalive_seconds=float(keepalive),
+        sse_failure_mode=sse_failure_mode,
     )
 
 
@@ -433,6 +456,7 @@ def build_job_payload(job: audio_to_text.AlignmentJob) -> dict[str, object]:
         "text_filename": job.job_input.text_filename,
         "language": job.job_input.language,
         "remove_punctuation": job.job_input.remove_punctuation,
+        "client_job_id": job.job_input.client_job_id,
         "created_at": job.created_at,
         "started_at": job.result.started_at,
         "completed_at": job.result.completed_at,
@@ -447,8 +471,7 @@ def process_job(
 ) -> None:
     """Process a background alignment job."""
     job = store.get_job(job_id)
-    if job is None:
-        return
+    assert job is not None
     job_input = job.job_input
     store.update_job(
         job_id,
@@ -539,6 +562,8 @@ def serve(config: BackendConfig) -> None:
     class BackendHandler(BaseHTTPRequestHandler):
         """HTTP request handler for the backend service."""
 
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, format: str, *args: object) -> None:
             LOGGER.info("%s - %s", self.client_address[0], format % args)
 
@@ -567,27 +592,48 @@ def serve(config: BackendConfig) -> None:
         def send_sse_headers(self) -> None:
             self.send_response(HTTPStatus.OK)
             self.send_cors_headers()
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header(
+                "Content-Type", "text/event-stream; charset=utf-8"
+            )
+            self.send_header("Cache-Control", "no-cache, no-transform")
             self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
+            self.wfile.flush()
+            self.close_connection = False
 
-        def send_sse_event(self, payload: dict[str, object]) -> bool:
-            body = f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+        def send_sse_event(
+            self,
+            payload: dict[str, object],
+            event_kind: str | None = None,
+            event_id: int | None = None,
+        ) -> bool:
+            lines: list[str] = []
+            if event_id is not None:
+                lines.append(f"id: {event_id}")
+            lines.append(f"data: {json.dumps(payload)}")
+            body = f"{'\n'.join(lines)}\n\n".encode("utf-8")
             try:
+                if event_kind is not None and event_kind == config.sse_failure_mode:
+                    raise OSError("sse event failure")
                 self.wfile.write(body)
                 self.wfile.flush()
             except OSError:
+                self.close_connection = True
                 return False
             return True
 
-        def send_sse_keepalive(self) -> bool:
-            try:
-                self.wfile.write(b": keepalive\n\n")
-                self.wfile.flush()
-            except OSError:
-                return False
-            return True
+        def send_sse_keepalive(
+            self,
+            event_kind: str | None = None,
+            event_id: int | None = None,
+        ) -> bool:
+            payload = {"type": "keepalive"}
+            return self.send_sse_event(
+                payload,
+                event_kind=event_kind,
+                event_id=event_id,
+            )
 
         def parse_job_id(self, path: str, suffix: str | None = None) -> str | None:
             prefix = "/api/jobs/"
@@ -627,7 +673,9 @@ def serve(config: BackendConfig) -> None:
                         "type": "snapshot",
                         "change_id": change_id,
                         "jobs": [build_job_payload(job) for job in jobs],
-                    }
+                    },
+                    event_kind=SSE_FAILURE_SNAPSHOT,
+                    event_id=change_id,
                 ):
                     return
                 while not shutdown_event.is_set():
@@ -635,7 +683,9 @@ def serve(config: BackendConfig) -> None:
                         change_id, timeout=config.keepalive_seconds
                     )
                     if next_change == change_id:
-                        if not self.send_sse_keepalive():
+                        if not self.send_sse_keepalive(
+                            event_kind=SSE_FAILURE_KEEPALIVE,
+                        ):
                             return
                         continue
                     change_id = next_change
@@ -645,7 +695,9 @@ def serve(config: BackendConfig) -> None:
                             "type": "snapshot",
                             "change_id": change_id,
                             "jobs": [build_job_payload(job) for job in jobs],
-                        }
+                        },
+                        event_kind=SSE_FAILURE_UPDATE,
+                        event_id=change_id,
                     ):
                         return
                 return
@@ -749,6 +801,7 @@ def serve(config: BackendConfig) -> None:
                 audio_path=str(raw_audio_path),
                 text_path=str(text_path),
                 output_path=str(output_path),
+                client_job_id=upload.client_job_id,
             )
             try:
                 job_dir.mkdir(parents=True, exist_ok=True)
@@ -805,8 +858,11 @@ def serve(config: BackendConfig) -> None:
     LOGGER.info("audio_to_text_backend.server.started address=%s:%s", config.host, config.port)
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        LOGGER.info("audio_to_text_backend.server.shutdown: received interrupt")
     finally:
         shutdown_event.set()
+        server.server_close()
         executor.shutdown(wait=True)
 
 
