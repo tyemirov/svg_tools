@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
-import audio_to_text
+from reel import audio_to_text
 
 if platform.system().lower() != "linux":
     pytest.skip(

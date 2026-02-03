@@ -1,0 +1,17 @@
+[run]
+branch = True
+parallel = True
+source =
+    reel/audio_to_text
+    reel/backend
+    reel/grpc
+    reel/render_text_video
+    reel/domain
+    reel/service
+
+[report]
+show_missing = True
+skip_covered = True
+omit =
+    reel/sitecustomize.py
+    reel/grpc/*_pb2*.py

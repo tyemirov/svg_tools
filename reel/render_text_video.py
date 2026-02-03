@@ -25,7 +25,7 @@ from typing import Callable, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
-from domain.text_video import (
+from reel.domain.text_video import (
     EMPTY_TEXT_CODE,
     BACKGROUND_IMAGE_CODE,
     FONT_DIR_CODE,
@@ -46,7 +46,7 @@ from domain.text_video import (
     parse_srt,
     parse_sbv,
 )
-from service.render_plan import RenderPlan, build_render_plan, build_rsvp_render_plan
+from reel.service.render_plan import RenderPlan, build_render_plan, build_rsvp_render_plan
 
 
 DIRECTIONS = ("L2R", "R2L", "T2B", "B2T")

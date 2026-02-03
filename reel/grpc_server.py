@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sys
 
-from audio_to_text_grpc.server import main
+from reel.grpc.server import main
 
 
 if __name__ == "__main__":

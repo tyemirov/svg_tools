@@ -23,9 +23,9 @@ from grpc_health.v1 import health as grpc_health
 from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 
-import audio_to_text
-from audio_to_text_grpc import audio_to_text_grpc_pb2
-from audio_to_text_grpc import audio_to_text_grpc_pb2_grpc
+from reel import audio_to_text
+from reel.grpc import audio_to_text_pb2
+from reel.grpc import audio_to_text_pb2_grpc
 
 LOGGER = logging.getLogger("audio_to_text_grpc")
 
@@ -296,10 +296,10 @@ def resolve_language(raw_value: str, transcript: str) -> str:
 
 
 def resolve_remove_punctuation(
-    punctuation_mode: audio_to_text_grpc_pb2.PunctuationMode.ValueType,
+    punctuation_mode: audio_to_text_pb2.PunctuationMode.ValueType,
 ) -> bool:
     """Map punctuation mode to a boolean removal flag."""
-    if punctuation_mode == audio_to_text_grpc_pb2.PUNCTUATION_MODE_KEEP:
+    if punctuation_mode == audio_to_text_pb2.PUNCTUATION_MODE_KEEP:
         return False
     return True
 
@@ -456,7 +456,7 @@ def ensure_deadline(context: grpc.ServicerContext, test_mode: bool = False) -> N
 
 
 def collect_request(
-    request_iterator: Iterator[audio_to_text_grpc_pb2.AlignChunk],
+    request_iterator: Iterator[audio_to_text_pb2.AlignChunk],
     config: ServerConfig,
     context: grpc.ServicerContext,
     temp_root: Path,
@@ -600,7 +600,7 @@ def build_alignment_runner(
     return align_in_process
 
 
-class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
+class AudioToTextService(audio_to_text_pb2_grpc.AudioToTextServicer):
     """gRPC service implementation."""
 
     def __init__(
@@ -620,9 +620,9 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
 
     def Align(
         self,
-        request_iterator: Iterator[audio_to_text_grpc_pb2.AlignChunk],
+        request_iterator: Iterator[audio_to_text_pb2.AlignChunk],
         context: grpc.ServicerContext,
-    ) -> audio_to_text_grpc_pb2.AlignResponse:
+    ) -> audio_to_text_pb2.AlignResponse:
         """Align a transcript to a streamed WAV."""
         acquired = self._inflight_semaphore.acquire(blocking=False)
 
@@ -661,7 +661,7 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                 ensure_deadline(context, self._config.test_mode)
                 srt_text = audio_to_text.build_srt(aligned_words)
             response_words = [
-                audio_to_text_grpc_pb2.AlignedWord(
+                audio_to_text_pb2.AlignedWord(
                     text=word.text,
                     start_seconds=float(word.start_seconds),
                     end_seconds=float(word.end_seconds),
@@ -669,7 +669,7 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
                 for word in aligned_words
             ]
             success = True
-            return audio_to_text_grpc_pb2.AlignResponse(
+            return audio_to_text_pb2.AlignResponse(
                 words=response_words,
                 srt=srt_text,
                 audio_filename=request.audio_filename,
@@ -705,13 +705,13 @@ class AudioToTextService(audio_to_text_grpc_pb2_grpc.AudioToTextServicer):
 
     def GetStats(
         self,
-        request: audio_to_text_grpc_pb2.StatsRequest,
+        request: audio_to_text_pb2.StatsRequest,
         context: grpc.ServicerContext,
-    ) -> audio_to_text_grpc_pb2.StatsResponse:
+    ) -> audio_to_text_pb2.StatsResponse:
         """Return a snapshot of metrics."""
         self._authorize(context)
         snapshot = self._metrics.snapshot(self._clock)
-        return audio_to_text_grpc_pb2.StatsResponse(
+        return audio_to_text_pb2.StatsResponse(
             requests_total=snapshot.requests_total,
             requests_succeeded=snapshot.requests_succeeded,
             requests_failed=snapshot.requests_failed,
@@ -807,7 +807,7 @@ def serve(
         alignment_runner=alignment_runner,
         alignment_executor=alignment_executor,
     )
-    audio_to_text_grpc_pb2_grpc.add_AudioToTextServicer_to_server(service, server)
+    audio_to_text_pb2_grpc.add_AudioToTextServicer_to_server(service, server)
     health_service = grpc_health.HealthServicer()
     health_service.set(
         "svg_tools.audio_to_text.v1.AudioToText",

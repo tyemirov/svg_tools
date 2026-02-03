@@ -16,7 +16,7 @@ from typing import List
 
 from PIL import Image, ImageDraw, ImageFont
 
-import render_text_video
+from reel import render_text_video
 
 BYTES_PER_PIXEL = 4
 ALPHA_THRESHOLD = 10

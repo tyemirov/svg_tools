@@ -18,7 +18,7 @@ from typing import Iterable
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-import audio_to_text_backend.server as audio_to_text_backend_server
+import reel.backend.server as audio_to_text_backend_server
 
 
 def free_local_port() -> int:

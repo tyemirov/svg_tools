@@ -1,0 +1,36 @@
+[project]
+name = "reel"
+version = "0.1.0"
+description = "Video/audio/subtitle manipulation tools"
+requires-python = ">=3.11"
+dependencies = [
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+grpc = [
+    "grpcio>=1.76",
+    "grpcio-health-checking>=1.76",
+    "protobuf>=4.25",
+    "whisperx==3.3.0",
+    "matplotlib<4",
+    "numpy<2",
+    "safetensors",
+    "torch>=2.6,<2.7; platform_system == 'Linux'",
+    "torchaudio>=2.6,<2.7; platform_system == 'Linux'",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "coverage",
+    "mypy",
+]
+
+[project.scripts]
+reel-grpc = "reel.grpc.server:main"
+reel-backend = "reel.backend.server:main"
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
