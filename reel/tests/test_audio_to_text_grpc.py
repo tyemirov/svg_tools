@@ -217,7 +217,10 @@ def start_server(
 ) -> subprocess.Popen[str]:
     """Start the gRPC server subprocess in test mode."""
     env = os.environ.copy()
-    # Set PYTHONPATH to parent of repo_root so 'reel' package can be found
+    # Apply extra_env first, then ensure parent_root is in PYTHONPATH
+    if extra_env:
+        env.update(extra_env)
+    # Ensure parent of repo_root is in PYTHONPATH so 'reel' package can be found
     parent_root = repo_root.parent
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
@@ -228,8 +231,6 @@ def start_server(
         env["AUDIO_TO_TEXT_GRPC_TEST_MODE"] = "1"
     else:
         env.pop("AUDIO_TO_TEXT_GRPC_TEST_MODE", None)
-    if extra_env:
-        env.update(extra_env)
     command = [
         sys.executable,
         "-m",
@@ -259,15 +260,16 @@ def run_grpc_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run the gRPC server CLI and capture output."""
     env = os.environ.copy()
-    # Set PYTHONPATH to parent of repo_root so 'reel' package can be found
+    # Apply extra_env first, then ensure parent_root is in PYTHONPATH
+    if extra_env:
+        env.update(extra_env)
+    # Ensure parent of repo_root is in PYTHONPATH so 'reel' package can be found
     parent_root = repo_root.parent
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
         env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
     else:
         env["PYTHONPATH"] = str(parent_root)
-    if extra_env:
-        env.update(extra_env)
     command = [sys.executable, "-m", "reel.audio_grpc.server", *args]
     return subprocess.run(
         command,
