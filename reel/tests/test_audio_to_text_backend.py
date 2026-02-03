@@ -115,13 +115,20 @@ def start_grpc_server(
 ) -> subprocess.Popen[str]:
     """Start the gRPC server subprocess in test mode."""
     env = os.environ.copy()
+    # Set PYTHONPATH to parent of repo_root so 'reel' package can be found
+    parent_root = repo_root.parent
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(parent_root)
     env["AUDIO_TO_TEXT_GRPC_TEST_MODE"] = "1"
     if extra_env:
         env.update(extra_env)
     command = [
         sys.executable,
         "-m",
-        "audio_to_text_grpc.server",
+        "reel.audio_grpc.server",
         "--host",
         "127.0.0.1",
         "--port",
@@ -146,13 +153,20 @@ def start_backend_server(
 ) -> subprocess.Popen[str]:
     """Start the backend server subprocess."""
     env = os.environ.copy()
+    # Set PYTHONPATH to parent of repo_root so 'reel' package can be found
+    parent_root = repo_root.parent
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(parent_root)
     env["AUDIO_TO_TEXT_BACKEND_GRPC_TARGET"] = grpc_target
     if extra_env:
         env.update(extra_env)
     command = [
         sys.executable,
         "-m",
-        "audio_to_text_backend.server",
+        "reel.backend.server",
         "--host",
         "127.0.0.1",
         "--port",
@@ -177,9 +191,16 @@ def run_backend_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run the backend CLI and capture output."""
     env = os.environ.copy()
+    # Set PYTHONPATH to parent of repo_root so 'reel' package can be found
+    parent_root = repo_root.parent
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(parent_root)
     if extra_env:
         env.update(extra_env)
-    command = [sys.executable, "-m", "audio_to_text_backend.server", *args]
+    command = [sys.executable, "-m", "reel.backend.server", *args]
     return subprocess.run(
         command,
         cwd=repo_root,

@@ -24,8 +24,8 @@ from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 
 from reel import audio_to_text
-from reel.grpc import audio_to_text_pb2
-from reel.grpc import audio_to_text_pb2_grpc
+from reel.audio_grpc import audio_to_text_pb2
+from reel.audio_grpc import audio_to_text_pb2_grpc
 
 LOGGER = logging.getLogger("audio_to_text_grpc")
 

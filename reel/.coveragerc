@@ -4,7 +4,7 @@ parallel = True
 source =
     reel/audio_to_text
     reel/backend
-    reel/grpc
+    reel/audio_grpc
     reel/render_text_video
     reel/domain
     reel/service
@@ -14,4 +14,4 @@ show_missing = True
 skip_covered = True
 omit =
     reel/sitecustomize.py
-    reel/grpc/*_pb2*.py
+    reel/audio_grpc/*_pb2*.py

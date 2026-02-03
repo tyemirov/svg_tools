@@ -21,7 +21,7 @@ COPY reel/__init__.py /app/reel/__init__.py
 COPY reel/backend_server.py /app/reel/backend_server.py
 COPY reel/backend /app/reel/backend
 COPY reel/audio_to_text.py /app/reel/audio_to_text.py
-COPY reel/grpc /app/reel/grpc
+COPY reel/audio_grpc /app/reel/audio_grpc
 
 RUN chmod +x /app/reel/backend_server.py
 

@@ -4,7 +4,7 @@ WORKDIR /app
 COPY reel/__init__.py /app/reel/__init__.py
 COPY reel/audio_to_text.py /app/reel/audio_to_text.py
 COPY reel/grpc_server.py /app/reel/grpc_server.py
-COPY reel/grpc /app/reel/grpc
+COPY reel/audio_grpc /app/reel/audio_grpc
 RUN uv run --no-project /app/reel/audio_to_text.py --help >/dev/null \
   && uv run --no-project /app/reel/grpc_server.py --help >/dev/null
 
@@ -23,7 +23,7 @@ COPY --from=builder /root/.cache/uv /root/.cache/uv
 COPY reel/__init__.py /app/reel/__init__.py
 COPY reel/audio_to_text.py /app/reel/audio_to_text.py
 COPY reel/grpc_server.py /app/reel/grpc_server.py
-COPY reel/grpc /app/reel/grpc
+COPY reel/audio_grpc /app/reel/audio_grpc
 COPY reel/docker/grpc/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/reel/audio_to_text.py /app/reel/grpc_server.py /app/entrypoint.sh \

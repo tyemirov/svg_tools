@@ -27,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-reel-grpc = "reel.grpc.server:main"
+reel-grpc = "reel.audio_grpc.server:main"
 reel-backend = "reel.backend.server:main"
 
 [tool.mypy]

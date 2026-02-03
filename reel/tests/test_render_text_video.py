@@ -45,6 +45,13 @@ def run_render_text_video(
 ) -> subprocess.CompletedProcess[str]:
     """Run render_text_video.py with the provided arguments."""
     env = os.environ.copy()
+    # Set PYTHONPATH to parent of repo_root so 'reel' package can be found
+    parent_root = repo_root.parent
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(parent_root)
     if env_overrides:
         env.update(env_overrides)
     return subprocess.run(
