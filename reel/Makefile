@@ -1,6 +1,6 @@
 .PHONY: test lint ci proto
 
-UV_CACHE_DIR ?= $(CURDIR)/../.cache/uv
+UV_CACHE_DIR ?= $(CURDIR)/.cache/uv
 COVERAGE_CONFIG ?= $(CURDIR)/.coveragerc
 
 test:
@@ -9,10 +9,10 @@ test:
 	    -- python -m pytest -q tests
 
 lint:
-	uv run --no-project --with mypy -- mypy --strict reel/domain reel/service
+	uv run --no-project --with mypy -- mypy --strict domain service
 
 proto:
 	python -m grpc_tools.protoc -I proto \
-	    --python_out=grpc --grpc_python_out=grpc proto/audio_to_text.proto
+	    --python_out=audio_grpc --grpc_python_out=audio_grpc proto/audio_to_text.proto
 
 ci: lint test

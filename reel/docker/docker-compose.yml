@@ -15,15 +15,15 @@ services:
     profiles:
       - stack
     build:
-      context: ../..
-      dockerfile: reel/docker/backend/Dockerfile.dev
+      context: ..
+      dockerfile: docker/backend/Dockerfile.dev
     env_file:
       - ../.env.backend
     ports:
       - "8080:8080"
     volumes:
-      - ../../:/app
-      - ../data:/app/reel/data
+      - ../:/app
+      - ../data:/app/data
     command: ["--host", "0.0.0.0", "--port", "8080"]
     depends_on:
       - audio_to_text_grpc
@@ -33,15 +33,15 @@ services:
       - grpc
       - stack
     build:
-      context: ../..
-      dockerfile: reel/docker/grpc/Dockerfile.dev
+      context: ..
+      dockerfile: docker/grpc/Dockerfile.dev
     env_file:
       - ../.env.grpc
     ports:
       - "50051:50051"
     volumes:
-      - ../../:/app
-      - ../data:/app/reel/data
+      - ../:/app
+      - ../data:/app/data
       - ../data/hf-cache:/opt/hf-cache
       - ../data/torch-cache:/opt/torch-cache
     command: ["--host", "0.0.0.0", "--port", "50051"]

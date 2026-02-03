@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 
-from reel.backend.server import main
+from backend.server import main
 
 
 if __name__ == "__main__":

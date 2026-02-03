@@ -2,16 +2,16 @@
 branch = True
 parallel = True
 source =
-    reel/audio_to_text
-    reel/backend
-    reel/audio_grpc
-    reel/render_text_video
-    reel/domain
-    reel/service
+    audio_to_text
+    backend
+    audio_grpc
+    render_text_video
+    domain
+    service
 
 [report]
 show_missing = True
 skip_covered = True
 omit =
-    reel/sitecustomize.py
-    reel/audio_grpc/*_pb2*.py
+    sitecustomize.py
+    audio_grpc/*_pb2*.py

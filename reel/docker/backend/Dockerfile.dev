@@ -2,8 +2,8 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS builder
 
 WORKDIR /app
 COPY . /app
-RUN uv run --no-project /app/reel/backend_server.py --help >/dev/null \
-  && uv run --no-project /app/reel/grpc_server.py --help >/dev/null
+RUN uv run --no-project /app/backend_server.py --help >/dev/null \
+  && uv run --no-project /app/grpc_server.py --help >/dev/null
 
 FROM python:3.12-slim
 
@@ -17,12 +17,12 @@ WORKDIR /app
 
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=builder /root/.cache/uv /root/.cache/uv
-COPY reel/__init__.py /app/reel/__init__.py
-COPY reel/backend_server.py /app/reel/backend_server.py
-COPY reel/backend /app/reel/backend
-COPY reel/audio_to_text.py /app/reel/audio_to_text.py
-COPY reel/audio_grpc /app/reel/audio_grpc
+COPY __init__.py /app/__init__.py
+COPY backend_server.py /app/backend_server.py
+COPY backend /app/backend
+COPY audio_to_text.py /app/audio_to_text.py
+COPY audio_grpc /app/audio_grpc
 
-RUN chmod +x /app/reel/backend_server.py
+RUN chmod +x /app/backend_server.py
 
-ENTRYPOINT ["/app/reel/backend_server.py"]
+ENTRYPOINT ["/app/backend_server.py"]

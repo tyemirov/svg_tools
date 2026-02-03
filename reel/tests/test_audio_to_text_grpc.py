@@ -19,9 +19,9 @@ import pytest
 from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 
-from reel.audio_grpc import audio_to_text_pb2
-from reel.audio_grpc import audio_to_text_pb2_grpc
-import reel.audio_grpc.server as audio_to_text_grpc_server
+from audio_grpc import audio_to_text_pb2
+from audio_grpc import audio_to_text_pb2_grpc
+import audio_grpc.server as audio_to_text_grpc_server
 
 TEST_CERT_PEM = b"""-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUT5mIG80bR112155jkEP7GIhvy2cwDQYJKoZIhvcNAQEL
@@ -217,16 +217,15 @@ def start_server(
 ) -> subprocess.Popen[str]:
     """Start the gRPC server subprocess in test mode."""
     env = os.environ.copy()
-    # Apply extra_env first, then ensure parent_root is in PYTHONPATH
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
     if extra_env:
         env.update(extra_env)
-    # Ensure parent of repo_root is in PYTHONPATH so 'reel' package can be found
-    parent_root = repo_root.parent
+    # Ensure repo_root is in PYTHONPATH so modules can be found
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
-        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
     else:
-        env["PYTHONPATH"] = str(parent_root)
+        env["PYTHONPATH"] = str(repo_root)
     if test_mode:
         env["AUDIO_TO_TEXT_GRPC_TEST_MODE"] = "1"
     else:
@@ -234,7 +233,7 @@ def start_server(
     command = [
         sys.executable,
         "-m",
-        "reel.audio_grpc.server",
+        "audio_grpc.server",
         "--host",
         "127.0.0.1",
         "--port",
@@ -260,17 +259,16 @@ def run_grpc_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run the gRPC server CLI and capture output."""
     env = os.environ.copy()
-    # Apply extra_env first, then ensure parent_root is in PYTHONPATH
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
     if extra_env:
         env.update(extra_env)
-    # Ensure parent of repo_root is in PYTHONPATH so 'reel' package can be found
-    parent_root = repo_root.parent
+    # Ensure repo_root is in PYTHONPATH so modules can be found
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
-        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
     else:
-        env["PYTHONPATH"] = str(parent_root)
-    command = [sys.executable, "-m", "reel.audio_grpc.server", *args]
+        env["PYTHONPATH"] = str(repo_root)
+    command = [sys.executable, "-m", "audio_grpc.server", *args]
     return subprocess.run(
         command,
         cwd=repo_root,
@@ -1241,7 +1239,7 @@ def test_audio_to_text_grpc_rejects_tls_config(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "reel.audio_grpc.server",
+            "audio_grpc.server",
             "--tls-cert",
             str(cert_path),
         ],

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 from typing import Sequence, Tuple
 
-from reel.domain.text_video import (
+from domain.text_video import (
     INVALID_WINDOW_CODE,
     RenderValidationError,
     SubtitleWindow,

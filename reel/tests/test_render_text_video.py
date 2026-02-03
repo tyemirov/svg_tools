@@ -16,7 +16,7 @@ from typing import List
 
 from PIL import Image, ImageDraw, ImageFont
 
-from reel import render_text_video
+import render_text_video
 
 BYTES_PER_PIXEL = 4
 ALPHA_THRESHOLD = 10
@@ -45,16 +45,15 @@ def run_render_text_video(
 ) -> subprocess.CompletedProcess[str]:
     """Run render_text_video.py with the provided arguments."""
     env = os.environ.copy()
-    # Apply env_overrides first, then ensure parent_root is in PYTHONPATH
+    # Apply env_overrides first, then ensure repo_root is in PYTHONPATH
     if env_overrides:
         env.update(env_overrides)
-    # Ensure parent of repo_root is in PYTHONPATH so 'reel' package can be found
-    parent_root = repo_root.parent
+    # Ensure repo_root is in PYTHONPATH so modules can be found
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
-        env["PYTHONPATH"] = f"{parent_root}{os.pathsep}{existing_pythonpath}"
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
     else:
-        env["PYTHONPATH"] = str(parent_root)
+        env["PYTHONPATH"] = str(repo_root)
     return subprocess.run(
         [sys.executable, *args],
         cwd=repo_root,
