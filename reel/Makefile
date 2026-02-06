@@ -9,7 +9,7 @@ test:
 	    -- python -m pytest -q tests
 
 lint:
-	uv run --no-project --with mypy -- mypy --strict domain service
+	uv run --no-project --with mypy -- mypy --strict --explicit-package-bases domain service
 
 proto:
 	python -m grpc_tools.protoc -I proto \
