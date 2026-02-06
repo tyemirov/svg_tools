@@ -24,8 +24,8 @@ from urllib.parse import urlparse
 import grpc
 
 import audio_to_text
-from audio_to_text_grpc import audio_to_text_grpc_pb2
-from audio_to_text_grpc import audio_to_text_grpc_pb2_grpc
+from audio_grpc import audio_to_text_pb2
+from audio_grpc import audio_to_text_pb2_grpc
 
 LOGGER = logging.getLogger("audio_to_text_backend")
 
@@ -370,7 +370,7 @@ class GrpcAligner:
     """gRPC aligner client."""
 
     channel: grpc.Channel
-    stub: audio_to_text_grpc_pb2_grpc.AudioToTextStub
+    stub: audio_to_text_pb2_grpc.AudioToTextStub
     auth_token: str | None
     timeout_seconds: float
 
@@ -384,25 +384,25 @@ class GrpcAligner:
     ) -> str:
         """Align text to audio via gRPC."""
         punctuation_mode = (
-            audio_to_text_grpc_pb2.PUNCTUATION_MODE_KEEP
+            audio_to_text_pb2.PUNCTUATION_MODE_KEEP
             if not remove_punctuation
-            else audio_to_text_grpc_pb2.PUNCTUATION_MODE_REMOVE
+            else audio_to_text_pb2.PUNCTUATION_MODE_REMOVE
         )
-        init = audio_to_text_grpc_pb2.AlignInit(
+        init = audio_to_text_pb2.AlignInit(
             transcript=transcript,
             language=language,
             punctuation=punctuation_mode,
             audio_filename=audio_filename,
         )
 
-        def stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            yield audio_to_text_grpc_pb2.AlignChunk(init=init)
+        def stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            yield audio_to_text_pb2.AlignChunk(init=init)
             with wav_path.open("rb") as handle:
                 while True:
                     chunk = handle.read(65536)
                     if not chunk:
                         break
-                    yield audio_to_text_grpc_pb2.AlignChunk(wav_chunk=chunk)
+                    yield audio_to_text_pb2.AlignChunk(wav_chunk=chunk)
 
         metadata = []
         if self.auth_token:
@@ -435,7 +435,7 @@ def build_grpc_aligner(config: BackendConfig) -> GrpcAligner:
         )
     else:
         channel = grpc.insecure_channel(config.grpc_target, options=options)
-    stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+    stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
     return GrpcAligner(
         channel=channel,
         stub=stub,

@@ -3,7 +3,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS builder
 WORKDIR /app
 COPY . /app
 RUN uv run --no-project /app/audio_to_text.py --help >/dev/null \
-  && uv run --no-project /app/audio_to_text_grpc.py --help >/dev/null
+  && uv run --no-project /app/grpc_server.py --help >/dev/null
 
 FROM python:3.12-slim
 
@@ -19,4 +19,4 @@ WORKDIR /app
 COPY --from=builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=builder /root/.cache/uv /root/.cache/uv
 
-ENTRYPOINT ["/app/docker/audio_to_text_grpc/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/grpc/entrypoint.sh"]

@@ -3,8 +3,8 @@ branch = True
 parallel = True
 source =
     audio_to_text
-    audio_to_text_backend
-    audio_to_text_grpc
+    backend
+    audio_grpc
     render_text_video
     domain
     service
@@ -14,4 +14,4 @@ show_missing = True
 skip_covered = True
 omit =
     sitecustomize.py
-    audio_to_text_grpc/*_pb2*.py
+    audio_grpc/*_pb2*.py

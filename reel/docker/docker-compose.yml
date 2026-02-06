@@ -6,7 +6,7 @@ services:
     ports:
       - "7860:7860"
     volumes:
-      - ../audio_to_text_ui:/data:ro
+      - ../ui:/data:ro
     command: ["--bind", "0.0.0.0", "--directory", "/data", "7860"]
     depends_on:
       - audio_to_text_backend
@@ -16,9 +16,9 @@ services:
       - stack
     build:
       context: ..
-      dockerfile: docker/audio_to_text_backend/Dockerfile.dev
+      dockerfile: docker/backend/Dockerfile.dev
     env_file:
-      - ../.env.audio_to_text_backend
+      - ../.env.backend
     ports:
       - "8080:8080"
     volumes:
@@ -34,9 +34,9 @@ services:
       - stack
     build:
       context: ..
-      dockerfile: docker/audio_to_text_grpc/Dockerfile.dev
+      dockerfile: docker/grpc/Dockerfile.dev
     env_file:
-      - ../.env.audio_to_text_grpc
+      - ../.env.grpc
     ports:
       - "50051:50051"
     volumes:

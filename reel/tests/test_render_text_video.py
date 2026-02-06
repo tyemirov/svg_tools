@@ -45,8 +45,15 @@ def run_render_text_video(
 ) -> subprocess.CompletedProcess[str]:
     """Run render_text_video.py with the provided arguments."""
     env = os.environ.copy()
+    # Apply env_overrides first, then ensure repo_root is in PYTHONPATH
     if env_overrides:
         env.update(env_overrides)
+    # Ensure repo_root is in PYTHONPATH so modules can be found
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(repo_root)
     return subprocess.run(
         [sys.executable, *args],
         cwd=repo_root,

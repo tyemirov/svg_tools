@@ -19,9 +19,9 @@ import pytest
 from grpc_health.v1 import health_pb2
 from grpc_health.v1 import health_pb2_grpc
 
-from audio_to_text_grpc import audio_to_text_grpc_pb2
-from audio_to_text_grpc import audio_to_text_grpc_pb2_grpc
-import audio_to_text_grpc.server as audio_to_text_grpc_server
+from audio_grpc import audio_to_text_pb2
+from audio_grpc import audio_to_text_pb2_grpc
+import audio_grpc.server as audio_to_text_grpc_server
 
 TEST_CERT_PEM = b"""-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUT5mIG80bR112155jkEP7GIhvy2cwDQYJKoZIhvcNAQEL
@@ -198,12 +198,12 @@ def build_silent_wav_bytes(duration_seconds: float) -> bytes:
 
 
 def stream_request(
-    init: audio_to_text_grpc_pb2.AlignInit, wav_bytes: bytes, chunk_size: int = 4096
-) -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
+    init: audio_to_text_pb2.AlignInit, wav_bytes: bytes, chunk_size: int = 4096
+) -> Iterator[audio_to_text_pb2.AlignChunk]:
     """Yield an init message followed by WAV chunks."""
-    yield audio_to_text_grpc_pb2.AlignChunk(init=init)
+    yield audio_to_text_pb2.AlignChunk(init=init)
     for offset in range(0, len(wav_bytes), chunk_size):
-        yield audio_to_text_grpc_pb2.AlignChunk(
+        yield audio_to_text_pb2.AlignChunk(
             wav_chunk=wav_bytes[offset : offset + chunk_size]
         )
 
@@ -217,16 +217,23 @@ def start_server(
 ) -> subprocess.Popen[str]:
     """Start the gRPC server subprocess in test mode."""
     env = os.environ.copy()
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
+    if extra_env:
+        env.update(extra_env)
+    # Ensure repo_root is in PYTHONPATH so modules can be found
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(repo_root)
     if test_mode:
         env["AUDIO_TO_TEXT_GRPC_TEST_MODE"] = "1"
     else:
         env.pop("AUDIO_TO_TEXT_GRPC_TEST_MODE", None)
-    if extra_env:
-        env.update(extra_env)
     command = [
         sys.executable,
         "-m",
-        "audio_to_text_grpc.server",
+        "audio_grpc.server",
         "--host",
         "127.0.0.1",
         "--port",
@@ -252,9 +259,16 @@ def run_grpc_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run the gRPC server CLI and capture output."""
     env = os.environ.copy()
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
     if extra_env:
         env.update(extra_env)
-    command = [sys.executable, "-m", "audio_to_text_grpc.server", *args]
+    # Ensure repo_root is in PYTHONPATH so modules can be found
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(repo_root)
+    command = [sys.executable, "-m", "audio_grpc.server", *args]
     return subprocess.run(
         command,
         cwd=repo_root,
@@ -293,12 +307,12 @@ def test_audio_to_text_grpc_align_defaults_to_remove_punctuation(tmp_path: Path)
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(
+        init = audio_to_text_pb2.AlignInit(
             transcript="Hello, world!",
-            punctuation=audio_to_text_grpc_pb2.PUNCTUATION_MODE_UNSPECIFIED,
+            punctuation=audio_to_text_pb2.PUNCTUATION_MODE_UNSPECIFIED,
         )
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert [word.text for word in response.words] == ["Hello", "world"]
         assert response.srt
@@ -314,9 +328,9 @@ def test_audio_to_text_grpc_defaults_language_for_cyrillic(tmp_path: Path) -> No
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="Привет мир")
+        init = audio_to_text_pb2.AlignInit(transcript="Привет мир")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert response.words
     finally:
@@ -333,12 +347,12 @@ def test_audio_to_text_grpc_align_keeps_punctuation_when_requested(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(
+        init = audio_to_text_pb2.AlignInit(
             transcript="Hello, world!",
-            punctuation=audio_to_text_grpc_pb2.PUNCTUATION_MODE_KEEP,
+            punctuation=audio_to_text_pb2.PUNCTUATION_MODE_KEEP,
         )
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert [word.text for word in response.words] == ["Hello,", "world!"]
         assert response.srt
@@ -353,9 +367,9 @@ def test_audio_to_text_grpc_rejects_invalid_wav(tmp_path: Path) -> None:
     process = start_server(repo_root, port)
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, b"not-a-wav"))
         status, details = read_error_status(exc_info.value)
@@ -373,11 +387,11 @@ def test_audio_to_text_grpc_requires_init(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
 
-        def invalid_stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            yield audio_to_text_grpc_pb2.AlignChunk(wav_chunk=b"\x00\x01")
+        def invalid_stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            yield audio_to_text_pb2.AlignChunk(wav_chunk=b"\x00\x01")
 
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(invalid_stream())
         status, details = read_error_status(exc_info.value)
@@ -395,9 +409,9 @@ def test_audio_to_text_grpc_rejects_empty_transcript(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript=" ")
+        init = audio_to_text_pb2.AlignInit(transcript=" ")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -434,11 +448,11 @@ def test_audio_to_text_grpc_stats_counts_requests(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             stub.Align(stream_request(init, wav_bytes))
-            stats = stub.GetStats(audio_to_text_grpc_pb2.StatsRequest())
+            stats = stub.GetStats(audio_to_text_pb2.StatsRequest())
         assert stats.requests_total >= 1
         assert stats.requests_succeeded >= 1
         assert stats.bytes_received >= len(wav_bytes)
@@ -458,11 +472,11 @@ def test_audio_to_text_grpc_stats_tracks_latency(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             stub.Align(stream_request(init, wav_bytes))
-            stats = stub.GetStats(audio_to_text_grpc_pb2.StatsRequest())
+            stats = stub.GetStats(audio_to_text_pb2.StatsRequest())
         assert stats.max_latency_seconds > 0.0
     finally:
         stop_process(process)
@@ -476,21 +490,21 @@ def test_audio_to_text_grpc_stats_handle_non_max_latency(tmp_path: Path) -> None
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.02)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
 
-        def slow_stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            yield audio_to_text_grpc_pb2.AlignChunk(init=init)
+        def slow_stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            yield audio_to_text_pb2.AlignChunk(init=init)
             for offset in range(0, len(wav_bytes), 512):
                 time.sleep(0.02)
-                yield audio_to_text_grpc_pb2.AlignChunk(
+                yield audio_to_text_pb2.AlignChunk(
                     wav_chunk=wav_bytes[offset : offset + 512]
                 )
 
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             stub.Align(slow_stream())
             stub.Align(stream_request(init, wav_bytes))
-            stats = stub.GetStats(audio_to_text_grpc_pb2.StatsRequest())
+            stats = stub.GetStats(audio_to_text_pb2.StatsRequest())
         assert stats.requests_total >= 2
         assert stats.max_latency_seconds > 0.0
     finally:
@@ -509,9 +523,9 @@ def test_audio_to_text_grpc_requires_auth_when_configured(tmp_path: Path) -> Non
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -519,10 +533,10 @@ def test_audio_to_text_grpc_requires_auth_when_configured(tmp_path: Path) -> Non
         assert "audio_to_text_grpc.auth.required" in details
         metadata = (("authorization", "Bearer secret"),)
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes), metadata=metadata)
             stats = stub.GetStats(
-                audio_to_text_grpc_pb2.StatsRequest(), metadata=metadata
+                audio_to_text_pb2.StatsRequest(), metadata=metadata
             )
         assert response.words
         assert stats.requests_total >= 1
@@ -542,9 +556,9 @@ def test_audio_to_text_grpc_rejects_audio_limit(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -568,9 +582,9 @@ def test_audio_to_text_grpc_rejects_transcript_char_limit(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -594,9 +608,9 @@ def test_audio_to_text_grpc_rejects_transcript_word_limit(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -621,11 +635,11 @@ def test_audio_to_text_grpc_inflight_limit(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
 
         def call_align() -> grpc.StatusCode:
             with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-                stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+                stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
                 try:
                     stub.Align(stream_request(init, wav_bytes))
                     return grpc.StatusCode.OK
@@ -662,9 +676,9 @@ def test_audio_to_text_grpc_alignment_timeout(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -682,18 +696,18 @@ def test_audio_to_text_grpc_request_deadline_exceeded(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
 
-        def slow_stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            yield audio_to_text_grpc_pb2.AlignChunk(init=init)
+        def slow_stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            yield audio_to_text_pb2.AlignChunk(init=init)
             for offset in range(0, len(wav_bytes), 256):
                 time.sleep(0.03)
-                yield audio_to_text_grpc_pb2.AlignChunk(
+                yield audio_to_text_pb2.AlignChunk(
                     wav_chunk=wav_bytes[offset : offset + 256]
                 )
 
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(slow_stream(), timeout=0.05)
         status, details = read_error_status(exc_info.value)
@@ -720,9 +734,9 @@ def test_audio_to_text_grpc_deadline_exceeded_after_alignment(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes), timeout=0.05)
         status, details = read_error_status(exc_info.value)
@@ -748,9 +762,9 @@ def test_audio_to_text_grpc_alignment_timeout_disabled(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert response.words
     finally:
@@ -767,10 +781,10 @@ def test_audio_to_text_grpc_deadline_exceeded_before_request(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         metadata = (("x-test-remaining", "0"),)
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(
                     stream_request(init, wav_bytes),
@@ -797,10 +811,10 @@ def test_audio_to_text_grpc_alignment_timeout_disabled_infinite_remaining(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         metadata = (("x-test-remaining", "inf"),)
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(
                 stream_request(init, wav_bytes),
                 metadata=metadata,
@@ -824,10 +838,10 @@ def test_audio_to_text_grpc_effective_timeout_defaults_to_config(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         metadata = (("x-test-remaining", "none"),)
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(
                 stream_request(init, wav_bytes),
                 metadata=metadata,
@@ -845,10 +859,10 @@ def test_audio_to_text_grpc_invalid_remaining_override(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         metadata = (("x-test-remaining", "bad-value"),)
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(
                 stream_request(init, wav_bytes),
                 metadata=metadata,
@@ -870,9 +884,9 @@ def test_audio_to_text_grpc_request_cancelled(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             call = stub.Align.future(stream_request(init, wav_bytes))
             time.sleep(0.05)
             assert call.cancel()
@@ -907,10 +921,10 @@ def test_audio_to_text_grpc_tls(tmp_path: Path) -> None:
             credentials,
             options=(("grpc.ssl_target_name_override", "localhost"),),
         ) as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(
                 stream_request(
-                    audio_to_text_grpc_pb2.AlignInit(transcript="hello"),
+                    audio_to_text_pb2.AlignInit(transcript="hello"),
                     build_silent_wav_bytes(0.2),
                 )
             )
@@ -927,12 +941,12 @@ def test_audio_to_text_grpc_rejects_invalid_language(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(
+        init = audio_to_text_pb2.AlignInit(
             transcript="hello",
             language="xx",
         )
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -952,12 +966,12 @@ def test_audio_to_text_grpc_rejects_punctuation_only_transcript(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(
+        init = audio_to_text_pb2.AlignInit(
             transcript="!!!",
-            punctuation=audio_to_text_grpc_pb2.PUNCTUATION_MODE_REMOVE,
+            punctuation=audio_to_text_pb2.PUNCTUATION_MODE_REMOVE,
         )
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -975,13 +989,13 @@ def test_audio_to_text_grpc_rejects_unexpected_stream_payload(tmp_path: Path) ->
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
 
-        def invalid_stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
-            yield audio_to_text_grpc_pb2.AlignChunk(init=init)
-            yield audio_to_text_grpc_pb2.AlignChunk(init=init)
+        def invalid_stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            init = audio_to_text_pb2.AlignInit(transcript="hello")
+            yield audio_to_text_pb2.AlignChunk(init=init)
+            yield audio_to_text_pb2.AlignChunk(init=init)
 
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(invalid_stream())
         status, details = read_error_status(exc_info.value)
@@ -999,11 +1013,11 @@ def test_audio_to_text_grpc_rejects_missing_init(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
 
-        def missing_init_stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            yield audio_to_text_grpc_pb2.AlignChunk(wav_chunk=b"RIFF")
+        def missing_init_stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            yield audio_to_text_pb2.AlignChunk(wav_chunk=b"RIFF")
 
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(missing_init_stream())
         status, details = read_error_status(exc_info.value)
@@ -1021,13 +1035,13 @@ def test_audio_to_text_grpc_rejects_empty_audio_stream(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
 
-        def empty_audio_stream() -> Iterator[audio_to_text_grpc_pb2.AlignChunk]:
-            init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
-            yield audio_to_text_grpc_pb2.AlignChunk(init=init)
-            yield audio_to_text_grpc_pb2.AlignChunk(wav_chunk=b"")
+        def empty_audio_stream() -> Iterator[audio_to_text_pb2.AlignChunk]:
+            init = audio_to_text_pb2.AlignInit(transcript="hello")
+            yield audio_to_text_pb2.AlignChunk(init=init)
+            yield audio_to_text_pb2.AlignChunk(wav_chunk=b"")
 
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(empty_audio_stream())
         status, details = read_error_status(exc_info.value)
@@ -1055,9 +1069,9 @@ def test_audio_to_text_grpc_inprocess_alignment_with_stubs(tmp_path: Path) -> No
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert [word.text for word in response.words] == ["hello", "world"]
     finally:
@@ -1085,9 +1099,9 @@ def test_audio_to_text_grpc_inprocess_alignment_drops_punctuation(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="Hello!!!")
+        init = audio_to_text_pb2.AlignInit(transcript="Hello!!!")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert [word.text for word in response.words] == ["hello"]
         assert response.srt
@@ -1114,9 +1128,9 @@ def test_audio_to_text_grpc_inprocess_alignment_failure(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello world")
+        init = audio_to_text_pb2.AlignInit(transcript="hello world")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -1138,9 +1152,9 @@ def test_audio_to_text_grpc_test_mode_crash(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             with pytest.raises(grpc.RpcError) as exc_info:
                 stub.Align(stream_request(init, wav_bytes))
         status, details = read_error_status(exc_info.value)
@@ -1162,9 +1176,9 @@ def test_audio_to_text_grpc_timeout_disabled(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert response.words
     finally:
@@ -1185,9 +1199,9 @@ def test_audio_to_text_grpc_timeout_uses_config_without_deadline(
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes))
         assert response.words
     finally:
@@ -1206,10 +1220,10 @@ def test_audio_to_text_grpc_accepts_api_key_auth(tmp_path: Path) -> None:
     try:
         wait_for_port("127.0.0.1", port, timeout_seconds=5)
         wav_bytes = build_silent_wav_bytes(0.2)
-        init = audio_to_text_grpc_pb2.AlignInit(transcript="hello")
+        init = audio_to_text_pb2.AlignInit(transcript="hello")
         metadata = (("x-api-key", "secret"),)
         with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = audio_to_text_grpc_pb2_grpc.AudioToTextStub(channel)
+            stub = audio_to_text_pb2_grpc.AudioToTextStub(channel)
             response = stub.Align(stream_request(init, wav_bytes), metadata=metadata)
         assert response.words
     finally:
@@ -1225,7 +1239,7 @@ def test_audio_to_text_grpc_rejects_tls_config(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "audio_to_text_grpc.server",
+            "audio_grpc.server",
             "--tls-cert",
             str(cert_path),
         ],

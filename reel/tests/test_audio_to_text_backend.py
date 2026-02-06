@@ -18,7 +18,7 @@ from typing import Iterable
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-import audio_to_text_backend.server as audio_to_text_backend_server
+import backend.server as audio_to_text_backend_server
 
 
 def free_local_port() -> int:
@@ -115,13 +115,20 @@ def start_grpc_server(
 ) -> subprocess.Popen[str]:
     """Start the gRPC server subprocess in test mode."""
     env = os.environ.copy()
-    env["AUDIO_TO_TEXT_GRPC_TEST_MODE"] = "1"
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
     if extra_env:
         env.update(extra_env)
+    # Ensure repo_root is in PYTHONPATH so modules can be found
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(repo_root)
+    env["AUDIO_TO_TEXT_GRPC_TEST_MODE"] = "1"
     command = [
         sys.executable,
         "-m",
-        "audio_to_text_grpc.server",
+        "audio_grpc.server",
         "--host",
         "127.0.0.1",
         "--port",
@@ -146,13 +153,20 @@ def start_backend_server(
 ) -> subprocess.Popen[str]:
     """Start the backend server subprocess."""
     env = os.environ.copy()
-    env["AUDIO_TO_TEXT_BACKEND_GRPC_TARGET"] = grpc_target
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
     if extra_env:
         env.update(extra_env)
+    # Ensure repo_root is in PYTHONPATH so modules can be found
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(repo_root)
+    env["AUDIO_TO_TEXT_BACKEND_GRPC_TARGET"] = grpc_target
     command = [
         sys.executable,
         "-m",
-        "audio_to_text_backend.server",
+        "backend.server",
         "--host",
         "127.0.0.1",
         "--port",
@@ -177,9 +191,16 @@ def run_backend_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run the backend CLI and capture output."""
     env = os.environ.copy()
+    # Apply extra_env first, then ensure repo_root is in PYTHONPATH
     if extra_env:
         env.update(extra_env)
-    command = [sys.executable, "-m", "audio_to_text_backend.server", *args]
+    # Ensure repo_root is in PYTHONPATH so modules can be found
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = str(repo_root)
+    command = [sys.executable, "-m", "backend.server", *args]
     return subprocess.run(
         command,
         cwd=repo_root,

@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from . import audio_to_text_grpc_pb2 as audio__to__text__grpc__pb2
+from . import audio_to_text_pb2 as audio__to__text__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
@@ -36,13 +36,13 @@ class AudioToTextStub(object):
         """
         self.Align = channel.stream_unary(
                 '/svg_tools.audio_to_text.v1.AudioToText/Align',
-                request_serializer=audio__to__text__grpc__pb2.AlignChunk.SerializeToString,
-                response_deserializer=audio__to__text__grpc__pb2.AlignResponse.FromString,
+                request_serializer=audio__to__text__pb2.AlignChunk.SerializeToString,
+                response_deserializer=audio__to__text__pb2.AlignResponse.FromString,
                 _registered_method=True)
         self.GetStats = channel.unary_unary(
                 '/svg_tools.audio_to_text.v1.AudioToText/GetStats',
-                request_serializer=audio__to__text__grpc__pb2.StatsRequest.SerializeToString,
-                response_deserializer=audio__to__text__grpc__pb2.StatsResponse.FromString,
+                request_serializer=audio__to__text__pb2.StatsRequest.SerializeToString,
+                response_deserializer=audio__to__text__pb2.StatsResponse.FromString,
                 _registered_method=True)
 
 
@@ -66,13 +66,13 @@ def add_AudioToTextServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Align': grpc.stream_unary_rpc_method_handler(
                     servicer.Align,
-                    request_deserializer=audio__to__text__grpc__pb2.AlignChunk.FromString,
-                    response_serializer=audio__to__text__grpc__pb2.AlignResponse.SerializeToString,
+                    request_deserializer=audio__to__text__pb2.AlignChunk.FromString,
+                    response_serializer=audio__to__text__pb2.AlignResponse.SerializeToString,
             ),
             'GetStats': grpc.unary_unary_rpc_method_handler(
                     servicer.GetStats,
-                    request_deserializer=audio__to__text__grpc__pb2.StatsRequest.FromString,
-                    response_serializer=audio__to__text__grpc__pb2.StatsResponse.SerializeToString,
+                    request_deserializer=audio__to__text__pb2.StatsRequest.FromString,
+                    response_serializer=audio__to__text__pb2.StatsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -100,8 +100,8 @@ class AudioToText(object):
             request_iterator,
             target,
             '/svg_tools.audio_to_text.v1.AudioToText/Align',
-            audio__to__text__grpc__pb2.AlignChunk.SerializeToString,
-            audio__to__text__grpc__pb2.AlignResponse.FromString,
+            audio__to__text__pb2.AlignChunk.SerializeToString,
+            audio__to__text__pb2.AlignResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -127,8 +127,8 @@ class AudioToText(object):
             request,
             target,
             '/svg_tools.audio_to_text.v1.AudioToText/GetStats',
-            audio__to__text__grpc__pb2.StatsRequest.SerializeToString,
-            audio__to__text__grpc__pb2.StatsResponse.FromString,
+            audio__to__text__pb2.StatsRequest.SerializeToString,
+            audio__to__text__pb2.StatsResponse.FromString,
             options,
             channel_credentials,
             insecure,
